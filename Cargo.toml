@@ -1,0 +1,50 @@
+[package]
+name = "gpu-provisioner"
+version = "0.1.0"
+edition = "2021"
+description = "Mini-SkyPilot: provision a cloud VM (AWS) with failover and SSH into it"
+license = "Apache-2.0"
+
+[[bin]]
+name = "gpuprov"
+path = "src/main.rs"
+
+[lib]
+name = "gpu_provisioner"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sdk-ec2 = "1"
+aws-sdk-ssm = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+rand_core = { version = "0.6", features = ["std"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ssh-key = { version = "0.6", features = ["ed25519"] }
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "time",
+    "net",
+    "io-util",
+] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+strip = true
