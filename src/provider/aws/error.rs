@@ -98,14 +98,40 @@ where
     err.code().map(str::to_string)
 }
 
-/// Map an SDK error to the failover taxonomy. `in_bootstrap` failures mean
-/// nothing was launched → `Config` (no teardown needed).
-pub fn to_provision_error<E, R>(
-    err: SdkError<E, R>,
-    region: &str,
-    zone: Option<String>,
-    in_bootstrap: bool,
-) -> ProvisionError
+/// Whether an SDK error carries a specific service error code.
+pub fn has_code<E, R>(err: &SdkError<E, R>, code: &str) -> bool
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    err.code() == Some(code)
+}
+
+/// `map_err` helper for calls made *before* any instance exists (planning,
+/// network/image/SG prep): a non-capacity failure means nothing was launched
+/// → `Config` (no teardown needed).
+pub fn in_bootstrap<E, R>(region: &str) -> impl Fn(SdkError<E, R>) -> ProvisionError + '_
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    move |err| to_provision_error(err, region, true)
+}
+
+/// `map_err` helper for calls made *after* an instance may exist: a
+/// non-capacity failure is `Other` (triggers teardown).
+pub fn at_runtime<E, R>(region: &str) -> impl Fn(SdkError<E, R>) -> ProvisionError + '_
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    move |err| to_provision_error(err, region, false)
+}
+
+/// Map an SDK error to the failover taxonomy. Capacity errors get the zone
+/// attached by the caller (the subnet loop) since only it knows which zone was
+/// being tried.
+fn to_provision_error<E, R>(err: SdkError<E, R>, region: &str, in_bootstrap: bool) -> ProvisionError
 where
     E: ProvideErrorMetadata + std::fmt::Debug,
     R: std::fmt::Debug,
@@ -115,20 +141,15 @@ where
         AwsErrorClass::Credentials => ProvisionError::Credentials { msg },
         AwsErrorClass::Capacity => ProvisionError::Capacity {
             region: region.to_string(),
-            zone,
+            zone: None,
             msg,
         },
         AwsErrorClass::ServerRetryable | AwsErrorClass::Other => {
+            let region = region.to_string();
             if in_bootstrap {
-                ProvisionError::Config {
-                    region: region.to_string(),
-                    msg,
-                }
+                ProvisionError::Config { region, msg }
             } else {
-                ProvisionError::Other {
-                    region: region.to_string(),
-                    msg,
-                }
+                ProvisionError::Other { region, msg }
             }
         }
     }

@@ -50,7 +50,10 @@ impl fmt::Display for VmState {
 pub struct VmRecord {
     pub name: String,
     pub state: VmState,
+    /// Canonical provider id (e.g. "aws") — which adapter owns this VM.
+    pub provider: Option<String>,
     pub region: Option<String>,
+    pub instance_type: Option<String>,
     pub zone: Option<String>,
     pub instance_id: Option<String>,
     pub public_ip: Option<String>,
@@ -80,7 +83,9 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS vms (
   name TEXT PRIMARY KEY,
   state TEXT NOT NULL,
+  provider TEXT,
   region TEXT,
+  instance_type TEXT,
   zone TEXT,
   instance_id TEXT,
   public_ip TEXT,
@@ -94,6 +99,28 @@ CREATE TABLE IF NOT EXISTS vms (
 );
 ";
 
+/// Create the table and apply additive migrations (older DBs lack columns
+/// that were added later; `ALTER TABLE ADD COLUMN` is idempotent modulo the
+/// duplicate-column error, which we swallow).
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    add_column(conn, "instance_type TEXT")?;
+    // Rows written before the provider column existed were all AWS-provisioned.
+    if add_column(conn, "provider TEXT")? {
+        conn.execute("UPDATE vms SET provider = 'aws' WHERE provider IS NULL", [])?;
+    }
+    Ok(())
+}
+
+/// Additive migration; returns true when the column was newly added.
+fn add_column(conn: &Connection, column_def: &str) -> rusqlite::Result<bool> {
+    match conn.execute(&format!("ALTER TABLE vms ADD COLUMN {column_def}"), []) {
+        Ok(_) => Ok(true),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -103,14 +130,14 @@ impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.execute_batch(SCHEMA)?;
+        init_schema(&conn)?;
         Ok(Self { conn })
     }
 
     #[cfg(test)]
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
+        init_schema(&conn)?;
         Ok(Self { conn })
     }
 
@@ -119,20 +146,33 @@ impl Db {
     pub fn upsert_provisioning(
         &self,
         name: &str,
+        provider: &str,
         region: &str,
+        instance_type: &str,
         spec_json: &str,
     ) -> rusqlite::Result<()> {
         let now = now_unix();
         self.conn.execute(
-            "INSERT INTO vms (name, state, region, spec_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "INSERT INTO vms (name, state, provider, region, instance_type, spec_json,
+                              created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
              ON CONFLICT(name) DO UPDATE SET
                state = excluded.state,
+               provider = excluded.provider,
                region = excluded.region,
+               instance_type = excluded.instance_type,
                zone = NULL, instance_id = NULL, public_ip = NULL, private_ip = NULL,
                spec_json = excluded.spec_json,
                updated_at = excluded.updated_at",
-            params![name, VmState::Provisioning.as_str(), region, spec_json, now],
+            params![
+                name,
+                VmState::Provisioning.as_str(),
+                provider,
+                region,
+                instance_type,
+                spec_json,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -175,7 +215,7 @@ impl Db {
             .query_row(
                 "SELECT name, state, region, zone, instance_id, public_ip, private_ip,
                         ssh_user, ssh_key_path, ssh_config_path, spec_json,
-                        created_at, updated_at
+                        created_at, updated_at, instance_type, provider
                  FROM vms WHERE name = ?1",
                 params![name],
                 record_from_row,
@@ -187,7 +227,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT name, state, region, zone, instance_id, public_ip, private_ip,
                     ssh_user, ssh_key_path, ssh_config_path, spec_json,
-                    created_at, updated_at
+                    created_at, updated_at, instance_type, provider
              FROM vms ORDER BY created_at",
         )?;
         let rows = stmt.query_map([], record_from_row)?;
@@ -221,6 +261,8 @@ fn record_from_row(row: &Row<'_>) -> rusqlite::Result<VmRecord> {
         spec_json: row.get(10)?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        instance_type: row.get(13)?,
+        provider: row.get(14)?,
     })
 }
 
@@ -244,10 +286,13 @@ mod tests {
     #[test]
     fn lifecycle_round_trip() {
         let db = Db::open_in_memory().unwrap();
-        db.upsert_provisioning("vm1", "us-west-2", "{}").unwrap();
+        db.upsert_provisioning("vm1", "aws", "us-west-2", "g6e.8xlarge", "{}")
+            .unwrap();
         let rec = db.get("vm1").unwrap().unwrap();
         assert_eq!(rec.state, VmState::Provisioning);
+        assert_eq!(rec.provider.as_deref(), Some("aws"));
         assert_eq!(rec.region.as_deref(), Some("us-west-2"));
+        assert_eq!(rec.instance_type.as_deref(), Some("g6e.8xlarge"));
         assert!(rec.public_ip.is_none());
 
         db.mark_up("vm1", &up_fields()).unwrap();
@@ -263,10 +308,12 @@ mod tests {
     #[test]
     fn reprovision_clears_stale_instance_fields() {
         let db = Db::open_in_memory().unwrap();
-        db.upsert_provisioning("vm1", "us-west-2", "{}").unwrap();
+        db.upsert_provisioning("vm1", "aws", "us-west-2", "t3.micro", "{}")
+            .unwrap();
         db.mark_up("vm1", &up_fields()).unwrap();
         // Failover to a new region resets instance fields.
-        db.upsert_provisioning("vm1", "us-east-1", "{}").unwrap();
+        db.upsert_provisioning("vm1", "aws", "us-east-1", "t3.micro", "{}")
+            .unwrap();
         let rec = db.get("vm1").unwrap().unwrap();
         assert_eq!(rec.state, VmState::Provisioning);
         assert_eq!(rec.region.as_deref(), Some("us-east-1"));
@@ -277,15 +324,66 @@ mod tests {
     #[test]
     fn list_returns_all() {
         let db = Db::open_in_memory().unwrap();
-        db.upsert_provisioning("a", "us-west-2", "{}").unwrap();
-        db.upsert_provisioning("b", "us-east-1", "{}").unwrap();
-        let names: Vec<String> = db.list().unwrap().into_iter().map(|r| r.name).collect();
+        db.upsert_provisioning("a", "aws", "us-west-2", "t3.micro", "{}")
+            .unwrap();
+        // Any provider id round-trips — the schema is cloud-agnostic.
+        db.upsert_provisioning("b", "gcp", "us-central1", "a2-highgpu-1g", "{}")
+            .unwrap();
+        let records = db.list().unwrap();
+        let names: Vec<&str> = records.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b"]);
+        assert_eq!(records[0].provider.as_deref(), Some("aws"));
+        assert_eq!(records[1].provider.as_deref(), Some("gcp"));
+        assert_eq!(records[1].instance_type.as_deref(), Some("a2-highgpu-1g"));
     }
 
     #[test]
     fn get_missing_is_none() {
         let db = Db::open_in_memory().unwrap();
         assert!(db.get("nope").unwrap().is_none());
+    }
+
+    /// A v1 database (no `instance_type`/`provider` columns) is migrated on
+    /// open; pre-existing rows get `provider = 'aws'` backfilled (v1 only ever
+    /// provisioned AWS).
+    #[test]
+    fn migrates_v1_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE vms (
+                   name TEXT PRIMARY KEY, state TEXT NOT NULL,
+                   region TEXT, zone TEXT, instance_id TEXT,
+                   public_ip TEXT, private_ip TEXT,
+                   ssh_user TEXT, ssh_key_path TEXT, ssh_config_path TEXT,
+                   spec_json TEXT NOT NULL,
+                   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO vms (name, state, region, spec_json, created_at, updated_at)
+                 VALUES ('old', 'UP', 'us-west-2', '{}', 1, 1);",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let rec = db.get("old").unwrap().unwrap();
+        assert_eq!(rec.state, VmState::Up);
+        assert!(rec.instance_type.is_none());
+        assert_eq!(rec.provider.as_deref(), Some("aws"));
+        // New writes populate the migrated columns.
+        db.upsert_provisioning("old", "aws", "us-east-2", "g6e.8xlarge", "{}")
+            .unwrap();
+        assert_eq!(
+            db.get("old").unwrap().unwrap().instance_type.as_deref(),
+            Some("g6e.8xlarge")
+        );
+        // Re-opening is idempotent and does not clobber providers.
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.get("old").unwrap().unwrap().provider.as_deref(),
+            Some("aws")
+        );
     }
 }

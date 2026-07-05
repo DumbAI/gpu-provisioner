@@ -6,11 +6,10 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
-use gpu_provisioner::config::AppConfig;
-use gpu_provisioner::db::{Db, VmState};
+use gpu_provisioner::config::{AppConfig, DEFAULT_SSH_USER};
+use gpu_provisioner::db::{Db, VmRecord, VmState};
 use gpu_provisioner::orchestrator;
-use gpu_provisioner::provider::aws::AwsProvider;
-use gpu_provisioner::provider::CloudProvider;
+use gpu_provisioner::provider;
 use gpu_provisioner::spec::{CliOverrides, VmSpec};
 use gpu_provisioner::ssh::config_file;
 use gpu_provisioner::ssh::options::SshOptions;
@@ -55,7 +54,7 @@ struct ProvisionArgs {
     /// EC2 instance type, e.g. t3.micro / g5.xlarge
     #[arg(long, conflicts_with = "gpus")]
     instance_type: Option<String>,
-    /// GPU shorthand from the built-in catalog, e.g. A10G:1, T4:1, H100:8
+    /// GPU shorthand from the built-in catalog, e.g. A10G:1, T4:1, L40S:1, H100:8
     #[arg(long)]
     gpus: Option<String>,
     /// Candidate region in failover order (repeatable)
@@ -149,9 +148,9 @@ async fn provision(args: ProvisionArgs, config: &AppConfig, paths: &Paths) -> Re
     });
 
     let db = Db::open(&paths.db_path()).context("cannot open state database")?;
-    let provider = AwsProvider::new(&config.aws).await;
+    let cloud = provider::build(provider::DEFAULT_PROVIDER, config).await?;
     let outcome =
-        orchestrator::launch(&provider, config, &db, paths, &spec, args.retry_until_up).await?;
+        orchestrator::launch(&*cloud, config, &db, paths, &spec, args.retry_until_up).await?;
 
     println!();
     println!(
@@ -182,9 +181,7 @@ async fn provision(args: ProvisionArgs, config: &AppConfig, paths: &Paths) -> Re
 /// whose exit code is propagated.
 async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
     let db = Db::open(&paths.db_path()).context("cannot open state database")?;
-    let record = db
-        .get(&args.name)?
-        .with_context(|| format!("no VM named '{}' — see `gpuprov list`", args.name))?;
+    let record = load_record(&db, &args.name)?;
     if record.state != VmState::Up {
         bail!(
             "VM '{}' is {}, not UP{}",
@@ -200,7 +197,9 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
     let ip = record
         .public_ip
         .context("record has no public IP; re-run `gpuprov provision`")?;
-    let user = record.ssh_user.unwrap_or_else(|| "ubuntu".to_string());
+    let user = record
+        .ssh_user
+        .unwrap_or_else(|| DEFAULT_SSH_USER.to_string());
     let key = record
         .ssh_key_path
         .map(PathBuf::from)
@@ -216,6 +215,12 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
     std::process::exit(code);
 }
 
+/// Look up a VM record by name, with a CLI-friendly not-found message.
+fn load_record(db: &Db, name: &str) -> Result<VmRecord> {
+    db.get(name)?
+        .with_context(|| format!("no VM named '{name}' — see `gpuprov list`"))
+}
+
 fn list(paths: &Paths) -> Result<()> {
     let db = Db::open(&paths.db_path()).context("cannot open state database")?;
     let records = db.list()?;
@@ -224,16 +229,18 @@ fn list(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<20} {:<13} {:<12} {:<12} {:<21} {:<16}",
-        "NAME", "STATE", "REGION", "ZONE", "INSTANCE_ID", "PUBLIC_IP"
+        "{:<20} {:<13} {:<9} {:<12} {:<12} {:<15} {:<21} {:<16}",
+        "NAME", "STATE", "PROVIDER", "REGION", "ZONE", "TYPE", "INSTANCE_ID", "PUBLIC_IP"
     );
     for r in records {
         println!(
-            "{:<20} {:<13} {:<12} {:<12} {:<21} {:<16}",
+            "{:<20} {:<13} {:<9} {:<12} {:<12} {:<15} {:<21} {:<16}",
             r.name,
             r.state.as_str(),
+            r.provider.as_deref().unwrap_or("-"),
             r.region.as_deref().unwrap_or("-"),
             r.zone.as_deref().unwrap_or("-"),
+            r.instance_type.as_deref().unwrap_or("-"),
             r.instance_id.as_deref().unwrap_or("-"),
             r.public_ip.as_deref().unwrap_or("-"),
         );
@@ -243,15 +250,29 @@ fn list(paths: &Paths) -> Result<()> {
 
 async fn down(args: DownArgs, config: &AppConfig, paths: &Paths) -> Result<()> {
     let db = Db::open(&paths.db_path()).context("cannot open state database")?;
-    let record = db
-        .get(&args.name)?
-        .with_context(|| format!("no VM named '{}' — see `gpuprov list`", args.name))?;
+    let record = load_record(&db, &args.name)?;
 
     match record.region.as_deref() {
         Some(region) => {
-            println!("Terminating VM '{}' in {region} ...", args.name);
-            let provider = AwsProvider::new(&config.aws).await;
-            provider.terminate(region, &args.name).await?;
+            // Dispatch teardown to the adapter that provisioned the VM
+            // (pre-provider-column records were all the default cloud).
+            let provider_name = record
+                .provider
+                .as_deref()
+                .unwrap_or(provider::DEFAULT_PROVIDER);
+            println!(
+                "Terminating VM '{}' in {region} ({provider_name}) ...",
+                args.name
+            );
+            let cloud = provider::build(provider_name, config)
+                .await
+                .with_context(|| {
+                    format!(
+                        "VM '{}' was provisioned by '{provider_name}', unsupported by this build",
+                        args.name
+                    )
+                })?;
+            cloud.terminate(region, &args.name).await?;
         }
         None => println!(
             "VM '{}' has no region recorded (never provisioned); removing local state only.",

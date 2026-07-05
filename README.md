@@ -28,14 +28,22 @@ $ gpuprov down dev
 
 `gpuprov provision` is one long-running, blocking operation:
 
-1. **Plan** (`planner.rs`) — resolve the instance type (directly or via the
-   built-in GPU catalog), expand the ordered candidate regions.
+1. **Plan** (`planner.rs` + the provider) — validate the spec, then let the
+   cloud provider resolve it into ordered `{instance_type, region, zone}`
+   candidates: a GPU ask like `L40S:1` expands to a ladder of instance types
+   (cheapest first — same GPU, more CPU/RAM as you go up), tried in every
+   candidate region before moving to the next type. GPU→type mapping and
+   region/zone naming are provider-specific (`provider/aws/catalog.rs`).
 2. **Provision with failover** (`failover.rs`) — per candidate region:
-   bootstrap (AMI via SSM public parameters, default-VPC public subnets,
-   per-VM security group) → find-or-create the EC2 instance (retrying across
-   zones/subnets on capacity errors) → wait until running. On failure:
+   bootstrap (live instance-type metadata: GPU/arch facts and the zones that
+   actually offer the type; AMI via SSM public parameters + per-image root
+   device/min-disk facts; default-VPC public subnets restricted to offering
+   zones; per-VM security group) → find-or-create the EC2 instance (retrying
+   across zones/subnets on capacity errors) → wait until running. On failure:
    classify the error, tear down partial resources, block the region, try the
-   next one. Credential errors abort; failed teardown aborts loudly.
+   next one. Credential errors abort; failed teardown aborts loudly. Regions
+   that don't sell the instance type are skipped cleanly before anything is
+   created.
 3. **Wait for SSH** (`ssh/wait.rs`) — TCP banner probe then a real SSH login
    probe, up to 10 minutes.
 4. **Persist** — write the VM record (IP, instance id, SSH fields) to the
@@ -104,19 +112,32 @@ ports: [8888]           # extra ingress besides SSH
 ssh_user: ubuntu
 ```
 
-Default AMIs (resolved per region at provision time via SSM):
-Canonical Ubuntu 22.04 for CPU instance types, AWS Deep Learning Base AMI
-(OSS NVIDIA driver, Ubuntu 22.04) for GPU types — `nvidia-smi` works on boot.
+Default AMIs are resolved per region at provision time via SSM public
+parameters, keyed on the instance type's live metadata (NVIDIA GPU? arch?):
 
-GPU catalog shorthand: `T4:1|4`, `A10G:1|4|8`, `L4:1`, `L40S:1`, `A100:8`,
-`H100:8` (see `src/catalog.rs`; `--instance-type` accepts anything).
+| | x86_64 | arm64 |
+|---|---|---|
+| CPU | Canonical Ubuntu 22.04 | Canonical Ubuntu 22.04 (arm64) |
+| GPU | Deep Learning Base AMI (OSS NVIDIA driver) | Deep Learning Base AMI arm64 (OSS NVIDIA driver) |
+
+`nvidia-smi` works on boot for GPU types. Pre-Turing GPUs (K80/V100/M60) are
+not supported by the OSS driver — pass `--ami`. Each AMI's root device name
+and minimum root-disk size are queried before launch; a `--disk` smaller than
+the AMI's snapshot is rejected with the required size.
+
+GPU catalog shorthand: `T4:1|4|8`, `A10G:1|4|8`, `L4:1|4|8`, `L40S:1|4|8`,
+`A100:8`, `A100-80GB:8`, `H100:8`, `H200:8` (see
+`src/provider/aws/catalog.rs`). One shorthand maps to a ladder of instance
+types with the same GPUs but growing CPU/RAM, tried cheapest-first with
+failover across types and regions; `--instance-type` pins one exact type
+(e.g. `g6e.8xlarge` for 1× L40S with 32 vCPUs).
 
 ## State & files
 
 ```
 ~/.gpu-provisioner/
 ├── config.toml        # optional CLI config (credentials, defaults)
-├── state.db           # SQLite: one row per VM (state, IPs, ssh fields)
+├── state.db           # SQLite: one row per VM (provider, state, type, IPs, ssh fields)
 ├── keys/gpuprov_ed25519{,.pub}
 ├── ssh/<vm-name>      # generated Host block, Include'd from ~/.ssh/config
 └── sockets/           # SSH ControlMaster sockets

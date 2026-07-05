@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::config::AppConfig;
 use crate::db::{Db, UpFields, VmState};
 use crate::failover::{self, FailoverError};
-use crate::planner::{self, Plan, PlanError};
+use crate::planner::{self, LaunchSpec, PlanError};
 use crate::provider::{CloudProvider, ProvisionError, VmInfo};
 use crate::spec::VmSpec;
 use crate::ssh::config_file;
@@ -67,47 +67,56 @@ pub async fn launch(
     retry_until_up: bool,
 ) -> Result<LaunchOutcome, LaunchError> {
     let keypair = keys::ensure_keypair(&paths.keys_dir())?;
-    let plan = planner::plan(spec, &config.defaults, &keypair.public_key_openssh)?;
-    tracing::info!(
-        "stage 1/4 plan: vm '{}', instance type {}, candidate regions [{}]{}",
-        plan.vm_name,
-        plan.instance_type,
-        plan.candidates
-            .iter()
-            .map(|c| c.region.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        if plan.spot { ", spot" } else { "" },
-    );
+    let prepared = planner::prepare(spec, &config.defaults, &keypair.public_key_openssh)?;
+    let launch = &prepared.launch;
 
     // Reconcile: an UP record whose instance is still running just gets
     // refreshed (find-or-create keeps this idempotent at the cloud level too).
-    if let Some(record) = db.get(&plan.vm_name)? {
+    if let Some(record) = db.get(&launch.vm_name)? {
         if record.state == VmState::Up {
             if let Some(region) = record.region.clone() {
                 tracing::info!(
                     "record for '{}' is UP in {region}; verifying against the cloud",
-                    plan.vm_name
+                    launch.vm_name
                 );
-                if let Some(info) = provider.describe(&region, &plan.vm_name).await? {
+                if let Some(info) = provider.describe(&region, &launch.vm_name).await? {
                     let zone = record.zone.clone().unwrap_or_default();
-                    return finalize(db, paths, &plan, &keypair, &region, &zone, info, true).await;
+                    return finalize(db, paths, launch, &keypair, &region, &zone, info, true).await;
                 }
                 tracing::warn!(
                     "no running instance found for '{}' in {region}; re-provisioning",
-                    plan.vm_name
+                    launch.vm_name
                 );
             }
         }
     }
 
+    // The provider resolves the resource ask into cloud-specific candidates
+    // (instance types × regions, in preference order).
+    let candidates = provider.plan_candidates(&prepared.request).await?;
+    let preview: Vec<String> = candidates.iter().take(6).map(|c| c.to_string()).collect();
+    tracing::info!(
+        "stage 1/4 plan: vm '{}' on {}, {} candidate(s): {}{}{}",
+        launch.vm_name,
+        provider.name(),
+        candidates.len(),
+        preview.join(", "),
+        if candidates.len() > preview.len() {
+            format!(", … +{} more", candidates.len() - preview.len())
+        } else {
+            String::new()
+        },
+        if launch.spot { " (spot)" } else { "" },
+    );
+
     let spec_json = serde_json::to_string(spec)
         .map_err(|e| LaunchError::Other(format!("cannot serialize spec: {e}")))?;
 
     tracing::info!("stage 2/4 provision: starting failover loop");
-    let outcome = loop {
-        match failover::provision_with_failover(provider, &plan, db, &spec_json).await {
-            Ok(outcome) => break outcome,
+    let record = loop {
+        match failover::provision_with_failover(provider, launch, &candidates, db, &spec_json).await
+        {
+            Ok(record) => break record,
             Err(e @ FailoverError::Exhausted { .. }) if retry_until_up => {
                 tracing::warn!("{e}");
                 tracing::info!(
@@ -121,23 +130,23 @@ pub async fn launch(
     };
 
     let info = provider
-        .describe(&outcome.record.region, &plan.vm_name)
+        .describe(&record.region, &launch.vm_name)
         .await?
         .ok_or_else(|| {
             LaunchError::Other(format!(
                 "instance for '{}' disappeared right after provisioning in {}",
-                plan.vm_name, outcome.record.region
+                launch.vm_name, record.region
             ))
         })?;
     finalize(
         db,
         paths,
-        &plan,
+        launch,
         &keypair,
-        &outcome.record.region,
-        &outcome.record.zone,
+        &record.region,
+        &record.zone,
         info,
-        outcome.record.reused,
+        record.reused,
     )
     .await
 }
@@ -147,7 +156,7 @@ pub async fn launch(
 async fn finalize(
     db: &Db,
     paths: &Paths,
-    plan: &Plan,
+    launch: &LaunchSpec,
     keypair: &KeyPair,
     region: &str,
     zone: &str,
@@ -157,46 +166,55 @@ async fn finalize(
     let public_ip = info.public_ip.clone().ok_or_else(|| {
         LaunchError::Other(format!(
             "instance {} has no public IP; clean up with `gpuprov down {}`",
-            info.instance_id, plan.vm_name
+            info.instance_id, launch.vm_name
         ))
     })?;
 
-    tracing::info!("stage 3/4 wait-ssh: probing {}@{public_ip}", plan.ssh_user);
+    tracing::info!(
+        "stage 3/4 wait-ssh: probing {}@{public_ip}",
+        launch.ssh_user
+    );
     let ssh_opts = SshOptions::new(keypair.private_path.clone());
-    wait::wait_for_ssh(&public_ip, &plan.ssh_user, &ssh_opts, wait::DEFAULT_TIMEOUT).await?;
+    wait::wait_for_ssh(
+        &public_ip,
+        &launch.ssh_user,
+        &ssh_opts,
+        wait::DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     tracing::info!("stage 4/4 persist: writing SSH config and DB record");
     let ssh_config_path = config_file::write_vm_host_entry(
         &paths.ssh_dir(),
-        &plan.vm_name,
+        &launch.vm_name,
         &public_ip,
-        &plan.ssh_user,
+        &launch.ssh_user,
         &keypair.private_path,
     )?;
     if let Some(user_ssh_config) = Paths::user_ssh_config_path() {
         config_file::ensure_include(&user_ssh_config, &paths.ssh_dir())?;
     }
     db.mark_up(
-        &plan.vm_name,
+        &launch.vm_name,
         &UpFields {
             region: region.to_string(),
             zone: zone.to_string(),
             instance_id: info.instance_id.clone(),
             public_ip: public_ip.clone(),
             private_ip: info.private_ip.clone(),
-            ssh_user: plan.ssh_user.clone(),
+            ssh_user: launch.ssh_user.clone(),
             ssh_key_path: keypair.private_path.display().to_string(),
             ssh_config_path: ssh_config_path.display().to_string(),
         },
     )?;
 
     Ok(LaunchOutcome {
-        name: plan.vm_name.clone(),
+        name: launch.vm_name.clone(),
         region: region.to_string(),
         zone: zone.to_string(),
         instance_id: info.instance_id,
         public_ip,
-        ssh_user: plan.ssh_user.clone(),
+        ssh_user: launch.ssh_user.clone(),
         ssh_key_path: keypair.private_path.clone(),
         ssh_config_path,
         reused,

@@ -1,17 +1,20 @@
 //! The failover engine ("Phase 4") — a port of SkyPilot's
 //! `RetryingVmProvisioner.provision_with_retries` collapsed to one cloud:
-//! walk the planner's candidate regions in order; per candidate run
-//! bootstrap → run_instance → wait; on failure classify the error, tear down
-//! partial resources when needed, block the region, and continue. Fatal
-//! errors (credentials, failed teardown) abort the whole loop.
+//! walk the provider-planned candidates (`{instance_type, region, zone}`,
+//! already in preference order) and per candidate run bootstrap →
+//! run_instance → wait; on failure classify the error, tear down partial
+//! resources when needed, block the candidate's (type, region), and continue.
+//! Fatal errors (credentials, failed teardown, unplannable request) abort.
 
 use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 
 use crate::db::{Db, VmState};
-use crate::planner::{build_request, Plan};
-use crate::provider::{CloudProvider, ProvisionError, ProvisionRecord, ProvisionRequest};
+use crate::planner::{build_request, LaunchSpec};
+use crate::provider::{
+    Candidate, CloudProvider, ProvisionError, ProvisionRecord, ProvisionRequest,
+};
 
 /// SkyPilot tears down partial resources with up to 3 attempts, 5s apart.
 const TEARDOWN_MAX_ATTEMPTS: usize = 3;
@@ -24,14 +27,8 @@ const WAIT_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub struct AttemptFailure {
-    pub region: String,
+    pub candidate: Candidate,
     pub error: ProvisionError,
-}
-
-#[derive(Debug)]
-pub struct FailoverOutcome {
-    pub record: ProvisionRecord,
-    pub request: ProvisionRequest,
 }
 
 #[derive(Debug)]
@@ -53,9 +50,9 @@ impl fmt::Display for FailoverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FailoverError::Exhausted { history } => {
-                write!(f, "provisioning failed in all candidate regions:")?;
+                write!(f, "provisioning failed for all candidates:")?;
                 for attempt in history {
-                    write!(f, "\n  - {}: {}", attempt.region, attempt.error)?;
+                    write!(f, "\n  - {}: {}", attempt.candidate, attempt.error)?;
                 }
                 Ok(())
             }
@@ -64,7 +61,7 @@ impl fmt::Display for FailoverError {
                 if !history.is_empty() {
                     write!(f, "\nearlier failover attempts:")?;
                     for attempt in history {
-                        write!(f, "\n  - {}: {}", attempt.region, attempt.error)?;
+                        write!(f, "\n  - {}: {}", attempt.candidate, attempt.error)?;
                     }
                 }
                 Ok(())
@@ -76,51 +73,62 @@ impl fmt::Display for FailoverError {
 
 impl std::error::Error for FailoverError {}
 
-/// Try each candidate region in order until one yields a running instance.
+/// Try each candidate in order until one yields a running instance.
 /// On success the DB row is left in `PROVISIONING` (the orchestrator marks
 /// `UP` after SSH is confirmed); on failure it is marked `FAILED`.
 pub async fn provision_with_failover(
     provider: &dyn CloudProvider,
-    plan: &Plan,
+    launch: &LaunchSpec,
+    candidates: &[Candidate],
     db: &Db,
     spec_json: &str,
-) -> Result<FailoverOutcome, FailoverError> {
+) -> Result<ProvisionRecord, FailoverError> {
     let mut history: Vec<AttemptFailure> = Vec::new();
-    let mut blocked: HashSet<String> = HashSet::new();
+    // Blocklist keyed on (instance_type, region) — capacity for one type must
+    // not block other types in the same region (SkyPilot's blocked Resources
+    // carry the instance type too).
+    let mut blocked: HashSet<(String, String)> = HashSet::new();
 
-    for candidate in &plan.candidates {
-        if blocked.contains(&candidate.region) {
+    for candidate in candidates {
+        let block_key = (candidate.instance_type.clone(), candidate.region.clone());
+        if blocked.contains(&block_key) {
             continue;
         }
         tracing::info!(
-            "[{}] attempting to provision '{}' ({})",
+            "[{}] attempting to provision '{}' as {}",
             candidate.region,
-            plan.vm_name,
-            plan.instance_type
+            launch.vm_name,
+            candidate
         );
         // ≈ SkyPilot recording the cluster as INIT before provisioning.
-        db.upsert_provisioning(&plan.vm_name, &candidate.region, spec_json)
-            .map_err(FailoverError::Db)?;
-        let request = build_request(plan, candidate);
+        db.upsert_provisioning(
+            &launch.vm_name,
+            provider.name(),
+            &candidate.region,
+            &candidate.instance_type,
+            spec_json,
+        )
+        .map_err(FailoverError::Db)?;
+        let request = build_request(launch, candidate);
 
         match attempt(provider, &request).await {
-            Ok(record) => return Ok(FailoverOutcome { record, request }),
+            Ok(record) => return Ok(record),
             Err(error) if error.is_fatal() => {
-                db.set_state(&plan.vm_name, VmState::Failed)
+                db.set_state(&launch.vm_name, VmState::Failed)
                     .map_err(FailoverError::Db)?;
                 return Err(FailoverError::Fatal { error, history });
             }
             Err(error) => {
-                tracing::warn!("[{}] attempt failed: {error}", candidate.region);
+                tracing::warn!("[{candidate}] attempt failed: {error}");
                 if error.needs_teardown() {
                     if let Err(teardown_error) =
-                        teardown(provider, &candidate.region, &plan.vm_name).await
+                        teardown(provider, &candidate.region, &launch.vm_name).await
                     {
                         history.push(AttemptFailure {
-                            region: candidate.region.clone(),
+                            candidate: candidate.clone(),
                             error,
                         });
-                        db.set_state(&plan.vm_name, VmState::Failed)
+                        db.set_state(&launch.vm_name, VmState::Failed)
                             .map_err(FailoverError::Db)?;
                         return Err(FailoverError::Fatal {
                             error: teardown_error,
@@ -128,16 +136,16 @@ pub async fn provision_with_failover(
                         });
                     }
                 }
-                blocked.insert(candidate.region.clone());
+                blocked.insert(block_key);
                 history.push(AttemptFailure {
-                    region: candidate.region.clone(),
+                    candidate: candidate.clone(),
                     error,
                 });
             }
         }
     }
 
-    db.set_state(&plan.vm_name, VmState::Failed)
+    db.set_state(&launch.vm_name, VmState::Failed)
         .map_err(FailoverError::Db)?;
     Err(FailoverError::Exhausted { history })
 }
@@ -148,8 +156,7 @@ async fn attempt(
     provider: &dyn CloudProvider,
     request: &ProvisionRequest,
 ) -> Result<ProvisionRecord, ProvisionError> {
-    let bootstrapped = provider.bootstrap(request).await?;
-    let record = provider.run_instance(request, &bootstrapped).await?;
+    let record = provider.provision(request).await?;
 
     tokio::time::sleep(WAIT_SETTLE).await;
     let mut delay = Duration::from_secs(1);
@@ -216,17 +223,16 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::config::Defaults;
-    use crate::provider::{Bootstrapped, SubnetInfo, VmInfo};
-    use crate::spec::VmSpec;
+    use crate::provider::{ResourceAsk, ResourceRequest, VmInfo};
 
-    /// Scripted per-region behavior for the fake provider.
+    /// Scripted `provision` outcome for the fake provider, keyed by `region`
+    /// or by `region:instance_type` (the more specific key wins).
     #[derive(Clone, Copy, PartialEq)]
     enum Behavior {
         Success,
-        CapacityOnRun,
-        ConfigOnBootstrap,
-        CredentialsOnRun,
+        Capacity,
+        Config,
+        Credentials,
     }
 
     struct FakeProvider {
@@ -244,11 +250,13 @@ mod tests {
             }
         }
 
-        fn behavior(&self, region: &str) -> Behavior {
+        fn behavior(&self, region: &str, instance_type: &str) -> Behavior {
+            let specific = format!("{region}:{instance_type}");
             self.behaviors
                 .iter()
-                .find(|(r, _)| *r == region)
-                .map(|(_, b)| *b)
+                .find(|(key, _)| *key == specific)
+                .or_else(|| self.behaviors.iter().find(|(key, _)| *key == region))
+                .map(|(_, behavior)| *behavior)
                 .unwrap_or(Behavior::Success)
         }
 
@@ -263,40 +271,49 @@ mod tests {
 
     #[async_trait]
     impl CloudProvider for FakeProvider {
-        async fn bootstrap(&self, req: &ProvisionRequest) -> Result<Bootstrapped, ProvisionError> {
-            self.log(format!("bootstrap:{}", req.region));
-            if self.behavior(&req.region) == Behavior::ConfigOnBootstrap {
-                return Err(ProvisionError::Config {
-                    region: req.region.clone(),
-                    msg: "no default VPC".into(),
-                });
-            }
-            Ok(Bootstrapped {
-                subnets: vec![SubnetInfo {
-                    subnet_id: "subnet-1".into(),
-                    zone: format!("{}a", req.region),
-                }],
-                security_group_id: "sg-1".into(),
-                resolved_ami: "ami-1".into(),
-            })
+        fn name(&self) -> &'static str {
+            "fake"
         }
 
-        async fn run_instance(
+        async fn plan_candidates(
+            &self,
+            request: &ResourceRequest,
+        ) -> Result<Vec<Candidate>, ProvisionError> {
+            // Trivial expansion for tests: one candidate per region.
+            let instance_type = match &request.ask {
+                ResourceAsk::InstanceType(it) => it.clone(),
+                ResourceAsk::Gpus(g) => format!("fake-{}", g.name),
+            };
+            Ok(request
+                .regions
+                .iter()
+                .map(|region| Candidate {
+                    instance_type: instance_type.clone(),
+                    region: region.clone(),
+                    zone: request.zone.clone(),
+                })
+                .collect())
+        }
+
+        async fn provision(
             &self,
             req: &ProvisionRequest,
-            _bootstrapped: &Bootstrapped,
         ) -> Result<ProvisionRecord, ProvisionError> {
-            self.log(format!("run:{}", req.region));
-            match self.behavior(&req.region) {
-                Behavior::CapacityOnRun => Err(ProvisionError::Capacity {
+            self.log(format!("provision:{}:{}", req.region, req.instance_type));
+            match self.behavior(&req.region, &req.instance_type) {
+                Behavior::Capacity => Err(ProvisionError::Capacity {
                     region: req.region.clone(),
                     zone: Some(format!("{}a", req.region)),
                     msg: "InsufficientInstanceCapacity".into(),
                 }),
-                Behavior::CredentialsOnRun => Err(ProvisionError::Credentials {
+                Behavior::Config => Err(ProvisionError::Config {
+                    region: req.region.clone(),
+                    msg: "no default VPC".into(),
+                }),
+                Behavior::Credentials => Err(ProvisionError::Credentials {
                     msg: "ExpiredToken".into(),
                 }),
-                _ => Ok(ProvisionRecord {
+                Behavior::Success => Ok(ProvisionRecord {
                     region: req.region.clone(),
                     zone: format!("{}a", req.region),
                     instance_id: "i-123".into(),
@@ -330,14 +347,24 @@ mod tests {
         }
     }
 
-    fn make_plan(regions: &[&str]) -> Plan {
-        let spec = VmSpec {
-            name: Some("vm1".into()),
-            instance_type: Some("t3.micro".into()),
-            regions: regions.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
-        };
-        crate::planner::plan(&spec, &Defaults::default(), "ssh-ed25519 AAAA t").unwrap()
+    fn make_launch() -> LaunchSpec {
+        LaunchSpec {
+            vm_name: "vm1".into(),
+            image_id: None,
+            disk_gb: 100,
+            spot: false,
+            extra_ports: Vec::new(),
+            ssh_user: "ubuntu".into(),
+            user_data: "#cloud-config".into(),
+        }
+    }
+
+    fn candidate(instance_type: &str, region: &str) -> Candidate {
+        Candidate {
+            instance_type: instance_type.into(),
+            region: region.into(),
+            zone: None,
+        }
     }
 
     fn test_db() -> Db {
@@ -347,34 +374,70 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn capacity_fails_over_to_next_region_with_teardown() {
         let provider = FakeProvider::new(vec![
-            ("us-west-2", Behavior::CapacityOnRun),
+            ("us-west-2", Behavior::Capacity),
             ("us-east-1", Behavior::Success),
         ]);
-        let plan = make_plan(&["us-west-2", "us-east-1"]);
+        let candidates = vec![
+            candidate("t3.micro", "us-west-2"),
+            candidate("t3.micro", "us-east-1"),
+        ];
         let db = test_db();
 
-        let outcome = provision_with_failover(&provider, &plan, &db, "{}")
+        let record = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
             .await
             .unwrap();
-        assert_eq!(outcome.record.region, "us-east-1");
+        assert_eq!(record.region, "us-east-1");
         let calls = provider.calls();
         assert!(calls.contains(&"terminate:us-west-2".to_string()));
-        // DB reflects the winning region, still PROVISIONING (orchestrator marks UP).
+        // DB reflects the winning candidate, still PROVISIONING (orchestrator marks UP).
         let rec = db.get("vm1").unwrap().unwrap();
         assert_eq!(rec.state, VmState::Provisioning);
         assert_eq!(rec.region.as_deref(), Some("us-east-1"));
+        // The provisioning provider's id is recorded on the row.
+        assert_eq!(rec.provider.as_deref(), Some("fake"));
+    }
+
+    /// One GPU ask expands to a type ladder; capacity for the small type must
+    /// fail over to the next type in the SAME region (blocklist is keyed on
+    /// (type, region), not region alone).
+    #[tokio::test(start_paused = true)]
+    async fn capacity_fails_over_to_next_instance_type_in_same_region() {
+        let provider = FakeProvider::new(vec![
+            ("us-east-2:g6e.xlarge", Behavior::Capacity),
+            ("us-east-2:g6e.2xlarge", Behavior::Success),
+        ]);
+        let candidates = vec![
+            candidate("g6e.xlarge", "us-east-2"),
+            candidate("g6e.2xlarge", "us-east-2"),
+        ];
+        let db = test_db();
+
+        let record = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
+            .await
+            .unwrap();
+        assert_eq!(record.region, "us-east-2");
+        // The winning instance type is recorded on the row.
+        let rec = db.get("vm1").unwrap().unwrap();
+        assert_eq!(rec.instance_type.as_deref(), Some("g6e.2xlarge"));
+        // Both types were actually attempted.
+        let calls = provider.calls();
+        assert!(calls.contains(&"provision:us-east-2:g6e.xlarge".to_string()));
+        assert!(calls.contains(&"provision:us-east-2:g6e.2xlarge".to_string()));
     }
 
     #[tokio::test(start_paused = true)]
     async fn credentials_error_aborts_immediately() {
         let provider = FakeProvider::new(vec![
-            ("us-west-2", Behavior::CredentialsOnRun),
+            ("us-west-2", Behavior::Credentials),
             ("us-east-1", Behavior::Success),
         ]);
-        let plan = make_plan(&["us-west-2", "us-east-1"]);
+        let candidates = vec![
+            candidate("t3.micro", "us-west-2"),
+            candidate("t3.micro", "us-east-1"),
+        ];
         let db = test_db();
 
-        let err = provision_with_failover(&provider, &plan, &db, "{}")
+        let err = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
             .await
             .unwrap_err();
         assert!(matches!(
@@ -385,8 +448,8 @@ mod tests {
             }
         ));
         let calls = provider.calls();
-        // Never moved on to the second region, never tore down.
-        assert!(!calls.iter().any(|c| c.ends_with("us-east-1")));
+        // Never moved on to the second candidate, never tore down.
+        assert!(!calls.iter().any(|c| c.contains("us-east-1")));
         assert!(!calls.iter().any(|c| c.starts_with("terminate")));
         assert_eq!(db.get("vm1").unwrap().unwrap().state, VmState::Failed);
     }
@@ -394,30 +457,36 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn config_error_skips_teardown_and_continues() {
         let provider = FakeProvider::new(vec![
-            ("us-west-2", Behavior::ConfigOnBootstrap),
+            ("us-west-2", Behavior::Config),
             ("us-east-1", Behavior::Success),
         ]);
-        let plan = make_plan(&["us-west-2", "us-east-1"]);
+        let candidates = vec![
+            candidate("t3.micro", "us-west-2"),
+            candidate("t3.micro", "us-east-1"),
+        ];
         let db = test_db();
 
-        let outcome = provision_with_failover(&provider, &plan, &db, "{}")
+        let record = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
             .await
             .unwrap();
-        assert_eq!(outcome.record.region, "us-east-1");
+        assert_eq!(record.region, "us-east-1");
         assert!(!provider.calls().iter().any(|c| c.starts_with("terminate")));
     }
 
     #[tokio::test(start_paused = true)]
     async fn teardown_failure_is_fatal() {
         let mut provider = FakeProvider::new(vec![
-            ("us-west-2", Behavior::CapacityOnRun),
+            ("us-west-2", Behavior::Capacity),
             ("us-east-1", Behavior::Success),
         ]);
         provider.fail_terminate = true;
-        let plan = make_plan(&["us-west-2", "us-east-1"]);
+        let candidates = vec![
+            candidate("t3.micro", "us-west-2"),
+            candidate("t3.micro", "us-east-1"),
+        ];
         let db = test_db();
 
-        let err = provision_with_failover(&provider, &plan, &db, "{}")
+        let err = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
             .await
             .unwrap_err();
         assert!(matches!(
@@ -427,34 +496,37 @@ mod tests {
                 ..
             }
         ));
-        // Retried teardown 3 times, never reached the second region.
+        // Retried teardown 3 times, never reached the second candidate.
         let terminates = provider
             .calls()
             .iter()
             .filter(|c| *c == "terminate:us-west-2")
             .count();
         assert_eq!(terminates, TEARDOWN_MAX_ATTEMPTS);
-        assert!(!provider.calls().iter().any(|c| c.ends_with("us-east-1")));
+        assert!(!provider.calls().iter().any(|c| c.contains("us-east-1")));
     }
 
     #[tokio::test(start_paused = true)]
     async fn exhaustion_reports_full_history_and_marks_failed() {
         let provider = FakeProvider::new(vec![
-            ("us-west-2", Behavior::CapacityOnRun),
-            ("us-east-1", Behavior::CapacityOnRun),
+            ("us-west-2", Behavior::Capacity),
+            ("us-east-1", Behavior::Capacity),
         ]);
-        let plan = make_plan(&["us-west-2", "us-east-1"]);
+        let candidates = vec![
+            candidate("t3.micro", "us-west-2"),
+            candidate("t3.micro", "us-east-1"),
+        ];
         let db = test_db();
 
-        let err = provision_with_failover(&provider, &plan, &db, "{}")
+        let err = provision_with_failover(&provider, &make_launch(), &candidates, &db, "{}")
             .await
             .unwrap_err();
         match &err {
             FailoverError::Exhausted { history } => {
                 assert_eq!(history.len(), 2);
                 let msg = err.to_string();
-                assert!(msg.contains("us-west-2"));
-                assert!(msg.contains("us-east-1"));
+                assert!(msg.contains("t3.micro@us-west-2"));
+                assert!(msg.contains("t3.micro@us-east-1"));
             }
             other => panic!("expected Exhausted, got {other:?}"),
         }

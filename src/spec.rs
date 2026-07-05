@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub name: Option<String>,
-    /// Exact EC2 instance type (e.g. `g5.xlarge`). Mutually exclusive with `gpus`.
+    /// Exact cloud instance type (e.g. `g5.xlarge`). Mutually exclusive with `gpus`.
     pub instance_type: Option<String>,
-    /// GPU shorthand resolved via the static catalog (e.g. `A10G:1`).
+    /// GPU shorthand (e.g. `A10G:1`), resolved by the cloud provider's
+    /// catalog into one or more instance types.
     pub gpus: Option<String>,
     /// Ordered failover candidate regions; falls back to config `defaults.regions`.
     #[serde(default)]

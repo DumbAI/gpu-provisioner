@@ -4,18 +4,18 @@
 use std::time::Duration;
 
 use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, Filter, HttpTokensState, Instance,
-    InstanceMarketOptionsRequest, InstanceMetadataOptionsRequest,
-    InstanceNetworkInterfaceSpecification, InstanceStateName, InstanceType, MarketType,
-    ResourceType, Tag, TagSpecification, VolumeType,
+    BlockDeviceMapping, EbsBlockDevice, HttpTokensState, Instance, InstanceMarketOptionsRequest,
+    InstanceMetadataOptionsRequest, InstanceNetworkInterfaceSpecification, InstanceStateName,
+    InstanceType, MarketType, ResourceType, Tag, TagSpecification, VolumeType,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
-use crate::provider::{Bootstrapped, ProvisionError, ProvisionRecord, ProvisionRequest, VmInfo};
+use crate::provider::{ProvisionError, ProvisionRecord, ProvisionRequest, VmInfo};
 
-use super::bootstrap::security_group_name;
+use super::bootstrap::{security_group_name, Bootstrapped};
 use super::error::{self, AwsErrorClass};
+use super::{filter, filter_values};
 
 /// Identity tag: every instance of a VM carries `gpuprov-vm-name=<name>`
 /// (the `ray-cluster-name` analog). All queries filter on it.
@@ -50,7 +50,7 @@ pub async fn run_instance(
     bootstrapped: &Bootstrapped,
 ) -> Result<ProvisionRecord, ProvisionError> {
     let region = &req.region;
-    let existing = find_instances(ec2, region, &req.vm_name, ACTIVE_STATES, false).await?;
+    let existing = find_instances(ec2, region, &req.vm_name, ACTIVE_STATES).await?;
 
     // Leak guard (SkyPilot: "more instances than requested").
     if existing.len() > 1 {
@@ -153,7 +153,7 @@ async fn create_instance(
             )
             .block_device_mappings(
                 BlockDeviceMapping::builder()
-                    .device_name("/dev/sda1")
+                    .device_name(&bootstrapped.root_device_name)
                     .ebs(
                         // SkyPilot's MEDIUM disk tier: gp3 @ 3500 IOPS / 218 MBps.
                         EbsBlockDevice::builder()
@@ -204,7 +204,7 @@ async fn create_instance(
                     backoff = std::cmp::min(backoff * 2, SERVER_RETRY_MAX_BACKOFF);
                     continue;
                 }
-                return Err(error::to_provision_error(e, region, None, false));
+                return Err(error::at_runtime(region)(e));
             }
         }
     }
@@ -232,7 +232,7 @@ pub async fn wait_running(
     vm_name: &str,
 ) -> Result<(), ProvisionError> {
     for _ in 0..WAIT_MAX_ATTEMPTS {
-        let instances = find_instances(ec2, region, vm_name, ACTIVE_STATES, false).await?;
+        let instances = find_instances(ec2, region, vm_name, ACTIVE_STATES).await?;
         if instances.is_empty() {
             // Instance vanished (e.g. spot reclaimed immediately) or state
             // lagging; the failover layer retries this a few times.
@@ -261,12 +261,11 @@ pub async fn describe(
     region: &str,
     vm_name: &str,
 ) -> Result<Option<VmInfo>, ProvisionError> {
-    let instances = find_instances(ec2, region, vm_name, &["running"], false).await?;
+    let instances = find_instances(ec2, region, vm_name, &["running"]).await?;
     Ok(instances.first().map(|i| VmInfo {
         instance_id: i.instance_id().unwrap_or_default().to_string(),
         public_ip: i.public_ip_address().map(str::to_string),
         private_ip: i.private_ip_address().map(str::to_string),
-        state: "running".to_string(),
     }))
 }
 
@@ -277,7 +276,7 @@ pub async fn terminate(
     region: &str,
     vm_name: &str,
 ) -> Result<(), ProvisionError> {
-    let instances = find_instances(ec2, region, vm_name, NON_TERMINATED_STATES, false).await?;
+    let instances = find_instances(ec2, region, vm_name, NON_TERMINATED_STATES).await?;
     let ids: Vec<String> = instances
         .iter()
         .filter_map(|i| i.instance_id().map(str::to_string))
@@ -288,9 +287,9 @@ pub async fn terminate(
             .set_instance_ids(Some(ids))
             .send()
             .await
-            .map_err(|e| error::to_provision_error(e, region, None, false))?;
+            .map_err(error::at_runtime(region))?;
         for _ in 0..WAIT_MAX_ATTEMPTS {
-            let left = find_instances(ec2, region, vm_name, ALL_LIVE_STATES, true).await?;
+            let left = find_instances(ec2, region, vm_name, ALL_LIVE_STATES).await?;
             if left.is_empty() {
                 break;
             }
@@ -308,12 +307,7 @@ async fn delete_security_group(ec2: &aws_sdk_ec2::Client, region: &str, vm_name:
     let sg_name = security_group_name(vm_name);
     let found = ec2
         .describe_security_groups()
-        .filters(
-            Filter::builder()
-                .name("group-name")
-                .values(&sg_name)
-                .build(),
-        )
+        .filters(filter("group-name", &sg_name))
         .send()
         .await;
     let groups = match found {
@@ -370,38 +364,14 @@ async fn find_instances(
     region: &str,
     vm_name: &str,
     states: &[&str],
-    in_teardown: bool,
 ) -> Result<Vec<Instance>, ProvisionError> {
-    let mut state_filter = Filter::builder().name("instance-state-name");
-    for state in states {
-        state_filter = state_filter.values(*state);
-    }
     let resp = ec2
         .describe_instances()
-        .filters(
-            Filter::builder()
-                .name(format!("tag:{TAG_VM_NAME}"))
-                .values(vm_name)
-                .build(),
-        )
-        .filters(state_filter.build())
+        .filters(filter(&format!("tag:{TAG_VM_NAME}"), vm_name))
+        .filters(filter_values("instance-state-name", states.iter().copied()))
         .send()
         .await
-        .map_err(|e| {
-            let err = error::to_provision_error(e, region, None, false);
-            if in_teardown {
-                // Keep teardown errors distinguishable for the failover layer.
-                match err {
-                    ProvisionError::Credentials { msg } => ProvisionError::Credentials { msg },
-                    other => ProvisionError::Other {
-                        region: region.to_string(),
-                        msg: format!("teardown status check failed: {other}"),
-                    },
-                }
-            } else {
-                err
-            }
-        })?;
+        .map_err(error::at_runtime(region))?;
     let mut instances: Vec<Instance> = resp
         .reservations()
         .iter()

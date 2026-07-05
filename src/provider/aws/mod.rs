@@ -3,19 +3,37 @@
 
 pub mod ami;
 pub mod bootstrap;
+pub mod catalog;
 pub mod error;
 pub mod instance;
+pub mod instance_type;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region};
+use aws_sdk_ec2::types::Filter;
 
 use crate::config::AwsConfig;
 use crate::provider::{
-    Bootstrapped, CloudProvider, ProvisionError, ProvisionRecord, ProvisionRequest, VmInfo,
+    Candidate, CloudProvider, ProvisionError, ProvisionRecord, ProvisionRequest, ResourceRequest,
+    VmInfo,
 };
+
+/// A single-valued EC2 describe filter — the AWS SDK's builder chain is
+/// verbose enough to be worth wrapping (used across bootstrap/instance queries).
+pub(crate) fn filter(name: &str, value: &str) -> Filter {
+    Filter::builder().name(name).values(value).build()
+}
+
+/// A multi-valued EC2 describe filter (e.g. a set of instance states).
+pub(crate) fn filter_values<'a>(name: &str, values: impl IntoIterator<Item = &'a str>) -> Filter {
+    values
+        .into_iter()
+        .fold(Filter::builder().name(name), |b, v| b.values(v))
+        .build()
+}
 
 pub struct AwsProvider {
     base: aws_config::SdkConfig,
@@ -86,18 +104,24 @@ impl AwsProvider {
 
 #[async_trait]
 impl CloudProvider for AwsProvider {
-    async fn bootstrap(&self, req: &ProvisionRequest) -> Result<Bootstrapped, ProvisionError> {
-        let clients = self.clients(&req.region);
-        bootstrap::bootstrap(&clients.ec2, &clients.ssm, req).await
+    fn name(&self) -> &'static str {
+        "aws"
     }
 
-    async fn run_instance(
+    async fn plan_candidates(
         &self,
-        req: &ProvisionRequest,
-        bootstrapped: &Bootstrapped,
-    ) -> Result<ProvisionRecord, ProvisionError> {
+        request: &ResourceRequest,
+    ) -> Result<Vec<Candidate>, ProvisionError> {
+        // Static catalog today; may consult pricing/offering APIs later
+        // (hence async on the trait).
+        catalog::plan_candidates(request)
+    }
+
+    async fn provision(&self, req: &ProvisionRequest) -> Result<ProvisionRecord, ProvisionError> {
         let clients = self.clients(&req.region);
-        instance::run_instance(&clients.ec2, &clients.ec2_fail_fast, req, bootstrapped).await
+        // Region prep (network, image, security group) then find-or-create.
+        let prep = bootstrap::bootstrap(&clients.ec2, &clients.ssm, req).await?;
+        instance::run_instance(&clients.ec2, &clients.ec2_fail_fast, req, &prep).await
     }
 
     async fn wait_running(&self, region: &str, vm_name: &str) -> Result<(), ProvisionError> {

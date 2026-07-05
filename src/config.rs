@@ -61,12 +61,15 @@ impl Default for Defaults {
     }
 }
 
+/// Default SSH login user for provisioned VMs (Ubuntu AMIs).
+pub const DEFAULT_SSH_USER: &str = "ubuntu";
+
 fn default_disk_gb() -> i32 {
     100
 }
 
 fn default_ssh_user() -> String {
-    "ubuntu".to_string()
+    DEFAULT_SSH_USER.to_string()
 }
 
 #[derive(Debug, thiserror::Error)]

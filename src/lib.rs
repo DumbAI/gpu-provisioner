@@ -13,7 +13,6 @@
 //! SQLite state), `planner`/`catalog`/`spec` (mini-optimizer), `config` (CLI
 //! config file), `userdata` (cloud-init).
 
-pub mod catalog;
 pub mod config;
 pub mod db;
 pub mod failover;

@@ -1,30 +1,22 @@
-//! The mini-optimizer ("Phase 3"): turn a validated `VmSpec` into an ordered
-//! list of failover candidates plus the per-candidate `ProvisionRequest`
-//! builder — the analog of SkyPilot's `Optimizer` +
-//! `make_launchables_for_valid_region_zones` + `make_deploy_resources_variables`,
-//! without a pricing catalog: the user's region order is the preference order.
+//! The cloud-agnostic half of planning ("Phase 3"): validate the `VmSpec` and
+//! split it into (a) a `ResourceRequest` for the provider to resolve into
+//! cloud-specific `{instance_type, region, zone}` candidates
+//! (`CloudProvider::plan_candidates`), and (b) the candidate-independent
+//! `LaunchSpec`. The cloud-dependent parts — GPU→instance-type mapping and
+//! region/zone conventions — live in each provider (AWS:
+//! `provider/aws/catalog.rs`), mirroring how SkyPilot's optimizer defers to
+//! per-cloud catalogs.
 
-use crate::catalog::{self, CatalogError};
 use crate::config::Defaults;
-use crate::provider::ProvisionRequest;
+use crate::provider::{Candidate, ProvisionRequest, ResourceAsk, ResourceRequest};
 use crate::spec::{SpecError, VmSpec};
 use crate::userdata;
 
-/// One failover candidate: a region, optionally pinned to specific zones.
+/// Everything needed to provision that does NOT vary per candidate.
 #[derive(Debug, Clone)]
-pub struct Candidate {
-    pub region: String,
-    pub zones: Vec<String>,
-}
-
-/// Everything needed to provision, independent of the candidate region.
-#[derive(Debug, Clone)]
-pub struct Plan {
+pub struct LaunchSpec {
     pub vm_name: String,
-    pub candidates: Vec<Candidate>,
-    pub instance_type: String,
-    pub needs_gpu_ami: bool,
-    pub ami: Option<String>,
+    pub image_id: Option<String>,
     pub disk_gb: i32,
     pub spot: bool,
     pub extra_ports: Vec<u16>,
@@ -32,34 +24,38 @@ pub struct Plan {
     pub user_data: String,
 }
 
+/// Output of `prepare`: the invariants plus the resource ask for the provider.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub launch: LaunchSpec,
+    pub request: ResourceRequest,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
     #[error(transparent)]
     Spec(#[from] SpecError),
-    #[error(transparent)]
-    Catalog(#[from] CatalogError),
+    #[error("invalid --gpus value: {0}")]
+    InvalidGpus(String),
     #[error("no candidate regions: pass --region (repeatable) or set defaults.regions in the config file")]
     NoRegions,
-    #[error("zone '{zone}' does not belong to any candidate region ({regions})")]
-    ZoneOutsideRegions { zone: String, regions: String },
 }
 
-pub fn plan(
+/// Validate the spec and assemble the provider-facing resource request plus
+/// the candidate-independent launch fields.
+pub fn prepare(
     spec: &VmSpec,
     defaults: &Defaults,
     public_key_openssh: &str,
-) -> Result<Plan, PlanError> {
+) -> Result<Prepared, PlanError> {
     let vm_name = spec.validated_name()?;
 
-    let (instance_type, needs_gpu_ami) = match (&spec.instance_type, &spec.gpus) {
+    let ask = match (&spec.instance_type, &spec.gpus) {
         (Some(_), Some(_)) | (None, None) => {
             return Err(SpecError::InstanceTypeXorGpus.into());
         }
-        (Some(it), None) => (it.clone(), catalog::is_gpu_instance_type(it)),
-        (None, Some(gpus)) => {
-            let offering = catalog::resolve_gpus(gpus)?;
-            (offering.instance_type.to_string(), true)
-        }
+        (Some(instance_type), None) => ResourceAsk::InstanceType(instance_type.clone()),
+        (None, Some(gpus)) => ResourceAsk::Gpus(gpus.parse().map_err(PlanError::InvalidGpus)?),
     };
 
     let regions = if spec.regions.is_empty() {
@@ -71,66 +67,43 @@ pub fn plan(
         return Err(PlanError::NoRegions);
     }
 
-    // A zone pin implies its region (SkyPilot: `Resources(zone=..)` fixes the
-    // region); all other candidate regions drop out.
-    let candidates = match &spec.zone {
-        None => regions
-            .iter()
-            .map(|r| Candidate {
-                region: r.clone(),
-                zones: Vec::new(),
-            })
-            .collect(),
-        Some(zone) => {
-            let owner = regions.iter().find(|r| zone.starts_with(r.as_str()));
-            match owner {
-                Some(region) => vec![Candidate {
-                    region: region.clone(),
-                    zones: vec![zone.clone()],
-                }],
-                None => {
-                    return Err(PlanError::ZoneOutsideRegions {
-                        zone: zone.clone(),
-                        regions: regions.join(", "),
-                    })
-                }
-            }
-        }
-    };
-
     let ssh_user = spec
         .ssh_user
         .clone()
         .unwrap_or_else(|| defaults.ssh_user.clone());
     let user_data = userdata::build_cloud_init(&ssh_user, public_key_openssh);
 
-    Ok(Plan {
-        vm_name,
-        candidates,
-        instance_type,
-        needs_gpu_ami,
-        ami: spec.ami.clone(),
-        disk_gb: spec.disk_gb.unwrap_or(defaults.disk_gb),
-        spot: spec.spot,
-        extra_ports: spec.ports.clone(),
-        ssh_user,
-        user_data,
+    Ok(Prepared {
+        launch: LaunchSpec {
+            vm_name,
+            image_id: spec.ami.clone(),
+            disk_gb: spec.disk_gb.unwrap_or(defaults.disk_gb),
+            spot: spec.spot,
+            extra_ports: spec.ports.clone(),
+            ssh_user,
+            user_data,
+        },
+        request: ResourceRequest {
+            ask,
+            regions,
+            zone: spec.zone.clone(),
+        },
     })
 }
 
-pub fn build_request(plan: &Plan, candidate: &Candidate) -> ProvisionRequest {
+/// Combine the launch invariants with one provider-produced candidate.
+pub fn build_request(launch: &LaunchSpec, candidate: &Candidate) -> ProvisionRequest {
     ProvisionRequest {
-        vm_name: plan.vm_name.clone(),
+        vm_name: launch.vm_name.clone(),
         region: candidate.region.clone(),
-        zones: candidate.zones.clone(),
-        instance_type: plan.instance_type.clone(),
-        ami_id: plan.ami.clone(),
-        needs_gpu_ami: plan.needs_gpu_ami,
-        disk_gb: plan.disk_gb,
-        spot: plan.spot,
-        extra_ports: plan.extra_ports.clone(),
-        user_data: plan.user_data.clone(),
-        ssh_user: plan.ssh_user.clone(),
+        zone: candidate.zone.clone(),
+        instance_type: candidate.instance_type.clone(),
+        image_id: launch.image_id.clone(),
+        disk_gb: launch.disk_gb,
+        spot: launch.spot,
+        extra_ports: launch.extra_ports.clone(),
+        user_data: launch.user_data.clone(),
+        ssh_user: launch.ssh_user.clone(),
     }
 }
 
@@ -150,49 +123,42 @@ mod tests {
     }
 
     #[test]
-    fn expands_regions_in_order() {
-        let plan = plan(&base_spec(), &Defaults::default(), KEY).unwrap();
-        let regions: Vec<&str> = plan.candidates.iter().map(|c| c.region.as_str()).collect();
-        assert_eq!(regions, vec!["us-west-2", "us-east-1"]);
-        assert!(!plan.needs_gpu_ami);
-        assert!(plan.user_data.contains(KEY));
+    fn splits_spec_into_launch_and_request() {
+        let prepared = prepare(&base_spec(), &Defaults::default(), KEY).unwrap();
+        assert_eq!(prepared.launch.vm_name, "vm1");
+        assert!(prepared.launch.user_data.contains(KEY));
+        assert!(matches!(
+            &prepared.request.ask,
+            ResourceAsk::InstanceType(it) if it == "t3.micro"
+        ));
+        assert_eq!(prepared.request.regions, vec!["us-west-2", "us-east-1"]);
+        // Zone resolution is the provider's job; the pin passes through.
+        assert!(prepared.request.zone.is_none());
     }
 
     #[test]
-    fn gpus_shorthand_resolves_and_needs_gpu_ami() {
+    fn gpus_shorthand_is_parsed_not_resolved() {
         let mut spec = base_spec();
         spec.instance_type = None;
-        spec.gpus = Some("A10G:1".into());
-        let plan = plan(&spec, &Defaults::default(), KEY).unwrap();
-        assert_eq!(plan.instance_type, "g5.xlarge");
-        assert!(plan.needs_gpu_ami);
+        spec.gpus = Some("l40s:4".into());
+        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
+        match &prepared.request.ask {
+            ResourceAsk::Gpus(gpus) => {
+                assert_eq!(gpus.name, "L40S");
+                assert_eq!(gpus.count, 4);
+            }
+            other => panic!("expected Gpus ask, got {other:?}"),
+        }
     }
 
     #[test]
-    fn gpu_instance_type_detected() {
+    fn malformed_gpus_is_rejected() {
         let mut spec = base_spec();
-        spec.instance_type = Some("g4dn.xlarge".into());
-        let plan = plan(&spec, &Defaults::default(), KEY).unwrap();
-        assert!(plan.needs_gpu_ami);
-    }
-
-    #[test]
-    fn zone_pin_restricts_to_owning_region() {
-        let mut spec = base_spec();
-        spec.zone = Some("us-east-1b".into());
-        let plan = plan(&spec, &Defaults::default(), KEY).unwrap();
-        assert_eq!(plan.candidates.len(), 1);
-        assert_eq!(plan.candidates[0].region, "us-east-1");
-        assert_eq!(plan.candidates[0].zones, vec!["us-east-1b"]);
-    }
-
-    #[test]
-    fn zone_outside_regions_is_rejected() {
-        let mut spec = base_spec();
-        spec.zone = Some("eu-west-1a".into());
+        spec.instance_type = None;
+        spec.gpus = Some("L40S:x".into());
         assert!(matches!(
-            plan(&spec, &Defaults::default(), KEY),
-            Err(PlanError::ZoneOutsideRegions { .. })
+            prepare(&spec, &Defaults::default(), KEY),
+            Err(PlanError::InvalidGpus(_))
         ));
     }
 
@@ -204,11 +170,11 @@ mod tests {
             regions: vec!["eu-central-1".into()],
             ..Default::default()
         };
-        let p = plan(&spec, &defaults, KEY).unwrap();
-        assert_eq!(p.candidates[0].region, "eu-central-1");
+        let prepared = prepare(&spec, &defaults, KEY).unwrap();
+        assert_eq!(prepared.request.regions, vec!["eu-central-1"]);
 
         assert!(matches!(
-            plan(&spec, &Defaults::default(), KEY),
+            prepare(&spec, &Defaults::default(), KEY),
             Err(PlanError::NoRegions)
         ));
     }
@@ -218,14 +184,29 @@ mod tests {
         let mut spec = base_spec();
         spec.gpus = Some("T4:1".into());
         assert!(matches!(
-            plan(&spec, &Defaults::default(), KEY),
+            prepare(&spec, &Defaults::default(), KEY),
             Err(PlanError::Spec(SpecError::InstanceTypeXorGpus))
         ));
         spec.instance_type = None;
         spec.gpus = None;
         assert!(matches!(
-            plan(&spec, &Defaults::default(), KEY),
+            prepare(&spec, &Defaults::default(), KEY),
             Err(PlanError::Spec(SpecError::InstanceTypeXorGpus))
         ));
+    }
+
+    #[test]
+    fn build_request_combines_launch_and_candidate() {
+        let prepared = prepare(&base_spec(), &Defaults::default(), KEY).unwrap();
+        let candidate = Candidate {
+            instance_type: "g6e.8xlarge".into(),
+            region: "us-east-2".into(),
+            zone: Some("us-east-2a".into()),
+        };
+        let request = build_request(&prepared.launch, &candidate);
+        assert_eq!(request.vm_name, "vm1");
+        assert_eq!(request.instance_type, "g6e.8xlarge");
+        assert_eq!(request.region, "us-east-2");
+        assert_eq!(request.zone.as_deref(), Some("us-east-2a"));
     }
 }
