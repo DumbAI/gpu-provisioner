@@ -27,6 +27,27 @@ pub async fn run_command(
     Ok(status.code().unwrap_or(255))
 }
 
+/// Run a command remotely and capture its output (unlike [`run_command`],
+/// which streams stdio to the parent). Used by callers that need to parse the
+/// remote output — e.g. reading back a k3s kubeconfig. Batch mode, no TTY.
+pub async fn run_command_capture(
+    user: &str,
+    host: &str,
+    opts: &SshOptions,
+    command: &[String],
+) -> std::io::Result<std::process::Output> {
+    let mut args = ssh_target_args(user, host, opts);
+    args.push(quote_command(command));
+    tokio::process::Command::new("ssh")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+}
+
 /// Replace the current process with an interactive `ssh user@host` session
 /// (full TTY passthrough). Only returns on spawn failure.
 #[cfg(unix)]

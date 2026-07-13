@@ -11,11 +11,13 @@
 //!
 //! Supporting subsystems: `ssh` (keys, wait, runner, ssh-config), `db` (local
 //! SQLite state), `planner`/`catalog`/`spec` (mini-optimizer), `config` (CLI
-//! config file), `userdata` (cloud-init).
+//! config file), `userdata` (cloud-init), `kube` (optional single-node k3s
+//! layer installed on top of a provisioned VM).
 
 pub mod config;
 pub mod db;
 pub mod failover;
+pub mod kube;
 pub mod orchestrator;
 pub mod planner;
 pub mod provider;

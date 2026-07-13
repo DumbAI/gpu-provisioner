@@ -1,0 +1,28 @@
+# GPU smoke test for a gpuprov k3s cluster provisioned with `--k8s` on a GPU
+# instance. Runs `nvidia-smi` in a container that requests one GPU.
+#
+#   kubectl apply -f examples/gpu-test.yaml
+#   kubectl wait --for=condition=complete job/gpu-test --timeout=300s
+#   kubectl logs job/gpu-test          # should print the GPU table
+#
+# `runtimeClassName: nvidia` is the RuntimeClass k3s auto-creates when the
+# NVIDIA container runtime is present. (gpuprov also installs k3s with
+# `--default-runtime nvidia`, so this line is belt-and-suspenders.)
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gpu-test
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      containers:
+        - name: cuda
+          image: nvidia/cuda:12.4.1-base-ubuntu22.04
+          command: ["nvidia-smi"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1

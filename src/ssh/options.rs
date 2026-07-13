@@ -5,6 +5,12 @@
 
 use std::path::PathBuf;
 
+/// Conservative cap for the ControlMaster socket path (macOS limits Unix-domain
+/// socket paths to 104 bytes; leave a small margin).
+const MAX_CONTROL_PATH: usize = 100;
+/// Length ssh appends after the control dir: `/` + `%C` (a 40-char hash).
+const CONTROL_PATH_SUFFIX_LEN: usize = 41;
+
 #[derive(Debug, Clone)]
 pub struct SshOptions {
     pub private_key: PathBuf,
@@ -66,9 +72,21 @@ impl SshOptions {
             opt("BatchMode", "yes".to_string());
         }
         if let Some(dir) = &self.control_dir {
-            opt("ControlMaster", "auto".to_string());
-            opt("ControlPath", format!("{}/%C", dir.display()));
-            opt("ControlPersist", "300s".to_string());
+            // Unix-domain socket paths are capped (~104 bytes on macOS, 108 on
+            // Linux). `%C` expands to a 40-char hash; if `<dir>/<hash>` would
+            // exceed the cap, ssh aborts with "ControlPath too long". Multiplexing
+            // is only an optimization, so skip it rather than break the connection.
+            if dir.as_os_str().len() + CONTROL_PATH_SUFFIX_LEN <= MAX_CONTROL_PATH {
+                opt("ControlMaster", "auto".to_string());
+                opt("ControlPath", format!("{}/%C", dir.display()));
+                opt("ControlPersist", "300s".to_string());
+            } else {
+                tracing::debug!(
+                    "disabling SSH ControlMaster: socket path under '{}' would exceed the \
+                     {MAX_CONTROL_PATH}-byte limit",
+                    dir.display()
+                );
+            }
         }
         args
     }
@@ -112,5 +130,28 @@ mod tests {
         let args = SshOptions::new(PathBuf::from("/k/id")).to_args().join(" ");
         assert!(!args.contains("ControlMaster"));
         assert!(!args.contains("BatchMode"));
+    }
+
+    #[test]
+    fn control_master_skipped_when_socket_path_too_long() {
+        // A deep GPUPROV_HOME (e.g. a temp dir) would push `<dir>/%C` past the
+        // OS socket-path limit; multiplexing is dropped rather than breaking ssh.
+        let long_dir = PathBuf::from(format!("/var/folders/{}/sockets", "x".repeat(90)));
+        let args = SshOptions::new(PathBuf::from("/k/id"))
+            .control_dir(Some(long_dir))
+            .to_args()
+            .join(" ");
+        assert!(!args.contains("ControlMaster"), "should skip: {args}");
+        assert!(!args.contains("ControlPath"), "should skip: {args}");
+
+        // A short dir still multiplexes.
+        let args = SshOptions::new(PathBuf::from("/k/id"))
+            .control_dir(Some(PathBuf::from("/tmp/s")))
+            .to_args()
+            .join(" ");
+        assert!(
+            args.contains("ControlPath=/tmp/s/%C"),
+            "should keep: {args}"
+        );
     }
 }

@@ -35,6 +35,11 @@ impl Paths {
         self.base.join("sockets")
     }
 
+    /// Per-VM kubeconfig files (`<base>/kube/<name>.yaml`) for k3s clusters.
+    pub fn kube_dir(&self) -> PathBuf {
+        self.base.join("kube")
+    }
+
     pub fn db_path(&self) -> PathBuf {
         self.base.join("state.db")
     }
@@ -48,13 +53,14 @@ impl Paths {
         dirs::home_dir().map(|h| h.join(".ssh").join("config"))
     }
 
-    /// Create the base/keys/ssh/sockets directories with owner-only permissions.
+    /// Create the base/keys/ssh/sockets/kube directories with owner-only permissions.
     pub fn ensure_dirs(&self) -> io::Result<()> {
         for dir in [
             self.base.clone(),
             self.keys_dir(),
             self.ssh_dir(),
             self.sockets_dir(),
+            self.kube_dir(),
         ] {
             std::fs::create_dir_all(&dir)?;
             set_permissions(&dir, 0o700)?;
