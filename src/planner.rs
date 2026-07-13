@@ -8,9 +8,14 @@
 //! per-cloud catalogs.
 
 use crate::config::Defaults;
+use crate::kube;
 use crate::provider::{Candidate, ProvisionRequest, ResourceAsk, ResourceRequest};
 use crate::spec::{SpecError, VmSpec};
-use crate::userdata;
+use crate::userdata::{self, Workload};
+
+/// Ports opened (at security-group creation) for a k3s node: the Kubernetes API
+/// server plus the k3s-bundled Traefik ingress / ServiceLB HTTP(S) endpoints.
+const K3S_PORTS: [u16; 3] = [6443, 80, 443];
 
 /// Everything needed to provision that does NOT vary per candidate.
 #[derive(Debug, Clone)]
@@ -71,7 +76,20 @@ pub fn prepare(
         .ssh_user
         .clone()
         .unwrap_or_else(|| defaults.ssh_user.clone());
-    let user_data = userdata::build_cloud_init(&ssh_user, public_key_openssh);
+
+    // The k8s ask (opt-in via the spec) both opens the k3s ports and swaps the
+    // cloud-init workload for the k3s installer. GPU-ness is decided at boot by
+    // the script itself, so the plan stays candidate-independent here.
+    let mut extra_ports = spec.ports.clone();
+    let workload = if spec.kubernetes {
+        extra_ports.extend(K3S_PORTS);
+        Workload::K3s {
+            install_script: kube::K3S_INSTALL_SCRIPT,
+        }
+    } else {
+        Workload::Bare
+    };
+    let user_data = userdata::build_cloud_init(&ssh_user, public_key_openssh, &workload);
 
     Ok(Prepared {
         launch: LaunchSpec {
@@ -79,7 +97,7 @@ pub fn prepare(
             image_id: spec.ami.clone(),
             disk_gb: spec.disk_gb.unwrap_or(defaults.disk_gb),
             spot: spec.spot,
-            extra_ports: spec.ports.clone(),
+            extra_ports,
             ssh_user,
             user_data,
         },
@@ -134,6 +152,33 @@ mod tests {
         assert_eq!(prepared.request.regions, vec!["us-west-2", "us-east-1"]);
         // Zone resolution is the provider's job; the pin passes through.
         assert!(prepared.request.zone.is_none());
+    }
+
+    #[test]
+    fn kubernetes_opens_k3s_ports_and_embeds_installer() {
+        let mut spec = base_spec();
+        spec.kubernetes = true;
+        spec.ports = vec![8080];
+        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
+        // User ports are preserved and the k3s ports are added.
+        for p in [8080u16, 6443, 80, 443] {
+            assert!(prepared.launch.extra_ports.contains(&p), "missing port {p}");
+        }
+        // The real installer embeds cleanly and the whole document stays valid YAML.
+        assert!(prepared.launch.user_data.contains("get.k3s.io"));
+        assert!(prepared.launch.user_data.contains("--tls-san"));
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&prepared.launch.user_data).unwrap();
+        assert!(parsed.get("runcmd").is_some());
+    }
+
+    #[test]
+    fn non_kubernetes_leaves_ports_and_userdata_bare() {
+        let mut spec = base_spec();
+        spec.ports = vec![8080];
+        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
+        assert_eq!(prepared.launch.extra_ports, vec![8080]);
+        assert!(!prepared.launch.user_data.contains("k3s"));
+        assert!(!prepared.launch.user_data.contains("write_files"));
     }
 
     #[test]

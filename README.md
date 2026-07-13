@@ -4,7 +4,8 @@ A mini-SkyPilot in Rust: provision a cloud VM (AWS) with region failover, then
 SSH into it and run anything. A clean-room re-implementation of the core of
 SkyPilot's provisioning pipeline — the stage machine, the failover engine, and
 the cloud provisioner API — without the CLI/server split, API server, Ray, or
-skylet.
+skylet. Optionally, `--k8s` turns the VM into a single-node **k3s** cluster and
+writes a local kubeconfig, so apps deploy as containers with plain `kubectl`.
 
 ```
 $ gpuprov provision --name dev --gpus T4:1 --region us-west-2 --region us-east-1
@@ -58,6 +59,41 @@ Layering (ports-and-adapters): `orchestrator` → `failover` → `CloudProvider`
 trait (`provider/mod.rs`) → `provider/aws` (the only module touching the AWS
 SDK). Adding a cloud = implementing the five-method trait.
 
+## Kubernetes (k3s)
+
+`--k8s` installs a single-node [k3s](https://k3s.io) cluster on the VM at boot
+(via cloud-init) and writes a local kubeconfig, so other applications deploy as
+containers with plain `kubectl` — nothing extra to run. k3s's own control plane
+(the `k3s.service` systemd unit) is the on-VM reconciler; there is no custom
+orchestrator.
+
+```bash
+$ gpuprov provision --k8s --gpus A10G:1 --name dev --region us-east-2
+...VM UP, then: waiting for k3s to come up (first boot installs it)...
+
+Kubernetes cluster 'gpuprov-dev' is ready.
+  API:         https://3.147.x.x:6443
+  Kubeconfig:  ~/.gpu-provisioner/kube/dev.yaml
+
+$ export KUBECONFIG=~/.gpu-provisioner/kube/dev.yaml
+$ kubectl get nodes
+$ kubectl apply -f examples/nginx.yaml       # a container app (reachable via Traefik on :80)
+$ kubectl apply -f examples/gpu-test.yaml    # GPU smoke test (runs nvidia-smi)
+$ gpuprov kubeconfig dev                     # re-fetch the kubeconfig anytime
+```
+
+- **Ports.** `--k8s` opens `6443` (API) plus `80`/`443` (the k3s-bundled Traefik
+  ingress / ServiceLB) at security-group creation. They open to `0.0.0.0/0` (like
+  SSH `22`); API access is gated by the client cert baked into the kubeconfig —
+  treat that file as a secret. Add `--port N` for extra NodePorts.
+- **GPU.** Auto-detected at boot via `nvidia-smi` (the GPU AMI ships the driver):
+  installs `nvidia-container-toolkit` and the NVIDIA device plugin and runs k3s
+  with `--default-runtime nvidia`, so pods request `nvidia.com/gpu` with no extra
+  config (see `examples/gpu-test.yaml`).
+- **Lifecycle.** The kubeconfig lives at `~/.gpu-provisioner/kube/<name>.yaml` and
+  is removed on `gpuprov down`. The public IP is stable for the VM's lifetime (no
+  Elastic IP); `gpuprov kubeconfig <name>` re-fetches it if the local file is lost.
+
 ## Install / build
 
 ```bash
@@ -108,6 +144,7 @@ regions: [us-west-2, us-east-1]
 # ami: ami-0123...      # optional override
 disk_gb: 200
 spot: false
+kubernetes: false       # true: install single-node k3s + write a local kubeconfig
 ports: [8888]           # extra ingress besides SSH
 ssh_user: ubuntu
 ```
@@ -139,8 +176,9 @@ failover across types and regions; `--instance-type` pins one exact type
 ├── config.toml        # optional CLI config (credentials, defaults)
 ├── state.db           # SQLite: one row per VM (provider, state, type, IPs, ssh fields)
 ├── keys/gpuprov_ed25519{,.pub}
-├── ssh/<vm-name>      # generated Host block, Include'd from ~/.ssh/config
-└── sockets/           # SSH ControlMaster sockets
+├── ssh/<vm-name>       # generated Host block, Include'd from ~/.ssh/config
+├── kube/<vm-name>.yaml # kubeconfig for a --k8s cluster (server rewritten to public IP)
+└── sockets/            # SSH ControlMaster sockets
 ```
 
 VM states: `PROVISIONING → UP → TERMINATED`, `FAILED` on exhausted failover.
@@ -154,6 +192,7 @@ final summary goes to stdout).
 ## Scope / non-goals
 
 Single VM per name, AWS only (trait is cloud-agnostic), terminate-only
-teardown (no stop/resume), no spot-preemption recovery, no on-VM agent, no
-storage mounts. See `SKYPILOT_VM_PROVISION.md` in the SkyPilot repo for the
-full-system reference this is distilled from.
+teardown (no stop/resume), no spot-preemption recovery, no storage mounts, and
+no on-VM agent beyond the optional `--k8s` k3s cluster (single-node; no
+multi-node join or HA control plane). See `SKYPILOT_VM_PROVISION.md` in the
+SkyPilot repo for the full-system reference this is distilled from.

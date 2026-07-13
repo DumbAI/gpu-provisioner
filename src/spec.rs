@@ -25,6 +25,10 @@ pub struct VmSpec {
     pub disk_gb: Option<i32>,
     #[serde(default)]
     pub spot: bool,
+    /// Install a single-node k3s cluster on the VM (via cloud-init) and open
+    /// the Kubernetes API + ingress ports (6443/80/443).
+    #[serde(default)]
+    pub kubernetes: bool,
     /// Extra security-group ingress ports besides SSH (22).
     #[serde(default)]
     pub ports: Vec<u16>,
@@ -42,6 +46,7 @@ pub struct CliOverrides {
     pub ami: Option<String>,
     pub disk_gb: Option<i32>,
     pub spot: bool,
+    pub kubernetes: bool,
     pub ports: Vec<u16>,
     pub ssh_user: Option<String>,
 }
@@ -104,6 +109,7 @@ impl VmSpec {
             self.disk_gb = cli.disk_gb;
         }
         self.spot |= cli.spot;
+        self.kubernetes |= cli.kubernetes;
         if !cli.ports.is_empty() {
             self.ports = cli.ports;
         }
@@ -165,6 +171,32 @@ mod tests {
         assert_eq!(merged.regions, vec!["us-west-2"]);
         assert!(merged.spot);
         assert_eq!(merged.disk_gb, Some(50)); // untouched
+    }
+
+    #[test]
+    fn kubernetes_flag_is_enable_only() {
+        // A file with kubernetes=true stays true even if the CLI doesn't set it.
+        let spec = VmSpec {
+            kubernetes: true,
+            ..Default::default()
+        };
+        assert!(spec.merged_with(CliOverrides::default()).kubernetes);
+        // The CLI flag can turn it on...
+        let spec = VmSpec::default().merged_with(CliOverrides {
+            kubernetes: true,
+            ..Default::default()
+        });
+        assert!(spec.kubernetes);
+        // ...but never off (mirrors --spot).
+        let spec = VmSpec {
+            kubernetes: true,
+            ..Default::default()
+        }
+        .merged_with(CliOverrides {
+            kubernetes: false,
+            ..Default::default()
+        });
+        assert!(spec.kubernetes);
     }
 
     #[test]

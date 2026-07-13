@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 
 use gpu_provisioner::config::{AppConfig, DEFAULT_SSH_USER};
 use gpu_provisioner::db::{Db, VmRecord, VmState};
+use gpu_provisioner::kube;
 use gpu_provisioner::orchestrator;
 use gpu_provisioner::provider;
 use gpu_provisioner::spec::{CliOverrides, VmSpec};
@@ -39,6 +40,8 @@ enum Command {
     Ssh(SshArgs),
     /// List VM records from the local database
     List,
+    /// Fetch/refresh the local kubeconfig for a k3s VM (provisioned with --k8s)
+    Kubeconfig(KubeconfigArgs),
     /// Terminate a VM and clean up its cloud resources and local state
     Down(DownArgs),
 }
@@ -72,6 +75,10 @@ struct ProvisionArgs {
     /// Request a spot instance
     #[arg(long)]
     spot: bool,
+    /// Install a single-node k3s cluster and open the Kubernetes API + ingress
+    /// ports (6443/80/443); writes a local kubeconfig when the VM is up
+    #[arg(long = "k8s")]
+    kubernetes: bool,
     /// Extra ingress port to open besides SSH (repeatable)
     #[arg(long = "port", value_name = "PORT")]
     ports: Vec<u16>,
@@ -90,6 +97,12 @@ struct SshArgs {
     /// Command to run remotely (after `--`); interactive shell if omitted
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
+}
+
+#[derive(Args)]
+struct KubeconfigArgs {
+    /// VM name (see `gpuprov list`)
+    name: String,
 }
 
 #[derive(Args)]
@@ -112,6 +125,7 @@ async fn main() -> Result<()> {
         Command::Provision(args) => provision(args, &config, &paths).await,
         Command::Ssh(args) => ssh(args, &paths).await,
         Command::List => list(&paths),
+        Command::Kubeconfig(args) => kubeconfig(args, &paths).await,
         Command::Down(args) => down(args, &config, &paths).await,
     }
 }
@@ -143,6 +157,7 @@ async fn provision(args: ProvisionArgs, config: &AppConfig, paths: &Paths) -> Re
         ami: args.ami,
         disk_gb: args.disk,
         spot: args.spot,
+        kubernetes: args.kubernetes,
         ports: args.ports,
         ssh_user: args.ssh_user,
     });
@@ -174,7 +189,49 @@ async fn provision(args: ProvisionArgs, config: &AppConfig, paths: &Paths) -> Re
     );
     println!("  SSH config:  {}", outcome.ssh_config_path.display());
     println!("  Record:      {}", paths.db_path().display());
+
+    if spec.kubernetes {
+        finalize_kubernetes(&outcome, paths).await?;
+    }
     Ok(())
+}
+
+/// After the VM is SSH-ready, wait for the k3s API and write a local kubeconfig.
+async fn finalize_kubernetes(outcome: &orchestrator::LaunchOutcome, paths: &Paths) -> Result<()> {
+    println!();
+    println!(
+        "Waiting for k3s to come up (first boot installs it; this can take a few minutes) ..."
+    );
+    let setup = kube::setup(
+        &outcome.name,
+        &outcome.public_ip,
+        &outcome.ssh_user,
+        &outcome.ssh_key_path,
+        paths,
+        kube::DEFAULT_READY_TIMEOUT,
+        outcome.reused,
+    )
+    .await?;
+    print_kube_instructions(&setup);
+    Ok(())
+}
+
+/// Print how to talk to the freshly-provisioned cluster.
+fn print_kube_instructions(setup: &kube::KubeSetup) {
+    println!();
+    println!("Kubernetes cluster '{}' is ready.", setup.context);
+    println!("  API:         {}", setup.api_endpoint);
+    println!("  Kubeconfig:  {}", setup.kubeconfig_path.display());
+    println!();
+    println!("  export KUBECONFIG={}", setup.kubeconfig_path.display());
+    println!("  kubectl get nodes");
+    println!("  kubectl apply -f examples/nginx.yaml      # deploy a container app");
+    println!("  kubectl apply -f examples/gpu-test.yaml   # GPU smoke test (GPU nodes)");
+    println!();
+    println!(
+        "  NOTE: the API (6443) and ingress (80/443) are open to 0.0.0.0/0; access is gated by"
+    );
+    println!("        the client cert inside the kubeconfig — treat that file as a secret.");
 }
 
 /// SSH using the DB record: interactive session, or run a one-shot command
@@ -194,16 +251,7 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
             }
         );
     }
-    let ip = record
-        .public_ip
-        .context("record has no public IP; re-run `gpuprov provision`")?;
-    let user = record
-        .ssh_user
-        .unwrap_or_else(|| DEFAULT_SSH_USER.to_string());
-    let key = record
-        .ssh_key_path
-        .map(PathBuf::from)
-        .context("record has no SSH key path; re-run `gpuprov provision`")?;
+    let (ip, user, key) = connection(&record)?;
     let opts = SshOptions::new(key).control_dir(Some(paths.sockets_dir()));
 
     if args.command.is_empty() {
@@ -219,6 +267,56 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
 fn load_record(db: &Db, name: &str) -> Result<VmRecord> {
     db.get(name)?
         .with_context(|| format!("no VM named '{name}' — see `gpuprov list`"))
+}
+
+/// Extract the SSH connection tuple `(public_ip, user, key_path)` from a record.
+fn connection(record: &VmRecord) -> Result<(String, String, PathBuf)> {
+    let ip = record
+        .public_ip
+        .clone()
+        .context("record has no public IP; re-run `gpuprov provision`")?;
+    let user = record
+        .ssh_user
+        .clone()
+        .unwrap_or_else(|| DEFAULT_SSH_USER.to_string());
+    let key = record
+        .ssh_key_path
+        .clone()
+        .map(PathBuf::from)
+        .context("record has no SSH key path; re-run `gpuprov provision`")?;
+    Ok((ip, user, key))
+}
+
+/// Fetch/refresh the local kubeconfig for a k3s VM (idempotent).
+async fn kubeconfig(args: KubeconfigArgs, paths: &Paths) -> Result<()> {
+    let db = Db::open(&paths.db_path()).context("cannot open state database")?;
+    let record = load_record(&db, &args.name)?;
+    if record.state != VmState::Up {
+        bail!("VM '{}' is {}, not UP", args.name, record.state);
+    }
+    let spec: VmSpec = serde_json::from_str(&record.spec_json)
+        .with_context(|| format!("cannot parse stored spec for VM '{}'", args.name))?;
+    if !spec.kubernetes {
+        bail!(
+            "VM '{}' was not provisioned with --k8s; there is no cluster to connect to",
+            args.name
+        );
+    }
+    let (ip, user, key) = connection(&record)?;
+    // The instance already exists (cloud-init won't re-run), so fail fast if
+    // k3s is somehow absent rather than waiting out the full timeout.
+    let setup = kube::setup(
+        &args.name,
+        &ip,
+        &user,
+        &key,
+        paths,
+        kube::DEFAULT_READY_TIMEOUT,
+        true,
+    )
+    .await?;
+    print_kube_instructions(&setup);
+    Ok(())
 }
 
 fn list(paths: &Paths) -> Result<()> {
@@ -281,6 +379,7 @@ async fn down(args: DownArgs, config: &AppConfig, paths: &Paths) -> Result<()> {
     }
     db.set_state(&args.name, VmState::Terminated)?;
     config_file::remove_vm_host_entry(&paths.ssh_dir(), &args.name)?;
+    kube::remove_kubeconfig(paths, &args.name)?;
     println!("VM '{}' terminated.", args.name);
     Ok(())
 }
