@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1122,8 +1122,8 @@ regions, so the cheapest type is tried in every region before a bigger one.</p>
 </tbody>
 </table>
 <h2 id="prepare-per-offer">Prepare (per offer)<a class="headerlink" href="#prepare-per-offer" title="Permanent link">&para;</a></h2>
-<p>This is a port of SkyPilot's <code>sky/provision/aws/config.py</code>, ordered cheapest
-check first so a region that isn't viable fails before anything is created:</p>
+<p>Checks run cheapest first, so a region that isn't viable fails before anything is
+created:</p>
 <ol>
 <li>Instance-type metadata (GPU, architecture) and the zones that actually offer the type.</li>
 <li>AMI: the Ubuntu / Deep Learning AMI matching GPU and architecture, resolved through

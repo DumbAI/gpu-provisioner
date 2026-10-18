@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -484,10 +484,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#what-happens" class="md-nav__link">
+  <a href="#turning-it-off" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What happens
+        Turning it off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-gets-installed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it gets installed
       
     </span>
   </a>
@@ -977,10 +988,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#what-happens" class="md-nav__link">
+  <a href="#turning-it-off" class="md-nav__link">
     <span class="md-ellipsis">
       
-        What happens
+        Turning it off
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-gets-installed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it gets installed
       
     </span>
   </a>
@@ -1019,37 +1041,95 @@
 
 
 <h1 id="kubernetes-k3s">Kubernetes (k3s)<a class="headerlink" href="#kubernetes-k3s" title="Permanent link">&para;</a></h1>
-<p><code>--k8s</code> turns the VM into a single-node <a href="https://k3s.io">k3s</a> cluster: real
-Kubernetes, managed by systemd on the node. You then deploy apps with plain
+<p>Every VM becomes a single-node <a href="https://k3s.io">k3s</a> cluster <strong>by default</strong>: real
+Kubernetes, managed by systemd on the node. You deploy apps with plain
 <code>kubectl</code>. There is no custom controller; k3s itself is the reconciler.</p>
-<div class="highlight"><pre><span></span><code>gpuprov<span class="w"> </span>provision<span class="w"> </span>--name<span class="w"> </span>gpu-k8s<span class="w"> </span>--gpus<span class="w"> </span>L4:1<span class="w"> </span>--cloud<span class="w"> </span>gcp<span class="w"> </span>--region<span class="w"> </span>us-central1<span class="w"> </span>--k8s
+<div class="highlight"><pre><span></span><code>gpuprov<span class="w"> </span>provision<span class="w"> </span>--name<span class="w"> </span>gpu-k8s<span class="w"> </span>--gpus<span class="w"> </span>L4:1<span class="w"> </span>--cloud<span class="w"> </span>gcp<span class="w"> </span>--region<span class="w"> </span>us-central1
 <span class="nb">export</span><span class="w"> </span><span class="nv">KUBECONFIG</span><span class="o">=</span>~/.gpu-provisioner/kube/gpu-k8s.yaml
 kubectl<span class="w"> </span>get<span class="w"> </span>nodes
 kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>examples/gpu-test.yaml<span class="w">    </span><span class="c1"># runs nvidia-smi in a pod requesting nvidia.com/gpu</span>
 kubectl<span class="w"> </span>logs<span class="w"> </span>job/gpu-test
 </code></pre></div>
-<h2 id="what-happens">What happens<a class="headerlink" href="#what-happens" title="Permanent link">&para;</a></h2>
+<h2 id="turning-it-off">Turning it off<a class="headerlink" href="#turning-it-off" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Scope</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>one VM</td>
+<td><code>gpuprov provision --no-k8s ...</code>, or <code>kubernetes: false</code> in the spec file</td>
+</tr>
+<tr>
+<td>everywhere</td>
+<td><code>[defaults] kubernetes = false</code> in <code>config.toml</code> (then <code>--k8s</code> opts a VM back in)</td>
+</tr>
+</tbody>
+</table>
+<p>On clouds that cannot host k3s (the Docker test cloud), the default is skipped
+with a note. An explicit <code>--k8s</code> there is rejected before anything is created.</p>
+<h2 id="how-it-gets-installed">How it gets installed<a class="headerlink" href="#how-it-gets-installed" title="Permanent link">&para;</a></h2>
 <p>The cluster is a <a href="../../architecture/state-machines/#45-k3s-cluster-machine-clusterk3srs">state machine</a>
-layered on the VM launch machine:</p>
+layered on the VM launch machine. The installer can reach the node by two routes:</p>
 <ol>
-<li><strong>VM.</strong> The normal launch runs, with failover and compensation. On clouds that
-   can open ports, it also opens 6443 (API), 80, and 443 (Traefik ingress).</li>
-<li><strong>Install.</strong> The installer is pushed over SSH and run as root. It is
-   idempotent: an already-running k3s is left alone. If <code>nvidia-smi</code> works, it
-   installs <code>nvidia-container-toolkit</code> (unless the image already has it), makes
-   <code>nvidia</code> the default containerd runtime, and applies the NVIDIA device plugin
-   (pinned <code>v0.19.3</code>).</li>
-<li><strong>API ready.</strong> It polls <code>/readyz</code> for up to 10 minutes.</li>
-<li><strong>Kubeconfig.</strong> It reads <code>/etc/rancher/k3s/k3s.yaml</code>, renames the
-   cluster/user/context to <code>gpuprov-&lt;name&gt;</code>, points <code>server</code> at the access
-   endpoint, and writes it with mode 0600.</li>
-<li><strong>Validate.</strong> On the node, it checks that the node is Ready, CoreDNS is ready,
-   and, if a GPU is present, that <code>nvidia.com/gpu</code> is allocatable. In direct mode
-   it also checks that the API port is reachable from your machine, which catches
-   firewall problems that on-node checks can't see.</li>
+<li><strong>Boot.</strong> On clouds that boot with cloud-init (AWS, GCP), the installer rides in
+   the VM's user data and runs while the VM boots, so the install overlaps the
+   wait for SSH.</li>
+<li>
+<p><strong>SSH.</strong> Once the VM is up, gpuprov checks what the boot run did (one SSH round
+   trip: a status marker, <code>cloud-init status</code>, the k3s unit, GPU presence):</p>
+<table>
+<thead>
+<tr>
+<th>Found</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>installed at boot, k3s running</td>
+<td>skip straight to the API check</td>
+</tr>
+<tr>
+<td>boot install still running</td>
+<td>wait (up to 15 minutes)</td>
+</tr>
+<tr>
+<td>boot install failed, never ran (no cloud-init, reused VM), or still running after 15 min</td>
+<td>push the installer over SSH</td>
+</tr>
+<tr>
+<td>a GPU the boot run didn't see</td>
+<td>push the installer over SSH to add the GPU runtime</td>
+</tr>
+</tbody>
+</table>
+</li>
 </ol>
-<p>If a cluster step fails, <strong>the VM is kept</strong> (state <code>Failed { vm }</code>) so you can
-debug it with <code>gpuprov ssh</code>. Re-run the same <code>provision</code> command to retry, or run
+<p>The two routes never race. The installer takes a host-wide lock, so an SSH run
+waits for a boot run still holding it. The installer is also idempotent: it
+writes <code>/etc/rancher/k3s/config.yaml</code> itself and restarts k3s only when that file
+changes.</p>
+<p>What the installer does: if <code>nvidia-smi</code> works, it installs <code>nvidia-container-toolkit</code>
+(unless the image already has it), makes <code>nvidia</code> the default containerd runtime,
+and applies the NVIDIA device plugin (pinned <code>v0.19.3</code>). Then it installs k3s.</p>
+<p>After installing, gpuprov:</p>
+<ol>
+<li><strong>waits for the API</strong> (<code>/readyz</code>, up to 10 minutes);</li>
+<li><strong>writes the kubeconfig</strong>: it reads <code>/etc/rancher/k3s/k3s.yaml</code>, renames the
+   cluster/user/context to <code>gpuprov-&lt;name&gt;</code>, points <code>server</code> at the access
+   endpoint, and saves it with mode 0600;</li>
+<li><strong>validates</strong> on the node that the node is Ready, CoreDNS is ready, and (with a
+   GPU) <code>nvidia.com/gpu</code> is allocatable. In direct mode it also checks that the API
+   certificate covers the public host and that the API port is reachable from your
+   machine. That last check catches firewall problems that on-node checks can't see.</li>
+</ol>
+<p>If a cluster step fails, <strong>the VM is kept</strong> so you can debug it with <code>gpuprov ssh</code>
+(the boot log is <code>/var/log/cloud-init-output.log</code>). Re-run the same <code>provision</code>
+command to retry; it reuses the VM and re-checks the install. Or run
 <code>gpuprov down</code> to remove it.</p>
 <h2 id="access-modes">Access modes<a class="headerlink" href="#access-modes" title="Permanent link">&para;</a></h2>
 <table>
@@ -1070,24 +1150,22 @@ debug it with <code>gpuprov ssh</code>. Re-run the same <code>provision</code> c
 </tr>
 <tr>
 <td>SSH tunnel</td>
-<td>the cloud can't (Prime Intellect, Docker)</td>
+<td>the cloud can't (Prime Intellect)</td>
 <td><code>https://127.0.0.1:16443</code></td>
 <td><code>gpuprov tunnel &lt;name&gt;</code> in another terminal</td>
 </tr>
 </tbody>
 </table>
-<p>The API certificate covers both: the public host is added as a TLS SAN, and
-<code>127.0.0.1</code> is always included.</p>
+<p>The API certificate covers the public host and always covers <code>127.0.0.1</code>. At boot
+the installer learns the public IP from the cloud's metadata service. If it
+can't, validation notices that the certificate doesn't cover the host and re-runs
+the installer once with it.</p>
 <div class="admonition warning">
 <p class="admonition-title">Direct mode exposure</p>
-<p>In direct mode, ports 6443, 80, and 443 are open to <code>0.0.0.0/0</code>. API access is
-gated by the client certificate inside the kubeconfig, so treat that file as a
-secret.</p>
-</div>
-<div class="admonition note">
-<p class="admonition-title">Docker cloud</p>
-<p>Docker test containers don't run systemd, so the k3s installer cannot run
-there. Use the Docker cloud for VM-lifecycle testing only.</p>
+<p>In direct mode, ports 6443, 80, and 443 are open to <code>0.0.0.0/0</code>, now on every
+VM by default. API access is gated by the client certificate inside the
+kubeconfig, so treat that file as a secret, or use <code>--no-k8s</code> for VMs that don't
+need a cluster.</p>
 </div>
 
 

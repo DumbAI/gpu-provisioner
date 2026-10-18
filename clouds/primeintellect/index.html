@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1072,9 +1072,9 @@ gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span cla
 gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>primeintellect<span class="w"> </span>--name<span class="w"> </span>dev2<span class="w"> </span>--gpus<span class="w"> </span>A100:8<span class="w"> </span>--region<span class="w"> </span>united_states
 </code></pre></div>
 <h2 id="planning-live-availability">Planning: live availability<a class="headerlink" href="#planning-live-availability" title="Permanent link">&para;</a></h2>
-<p>Unlike SkyPilot, which reads a static <code>vms.csv</code> catalog, <code>gpuprov</code> queries
-<code>GET /api/v1/availability/gpus</code> live. A marketplace's stock changes minute to
-minute, so a static catalog is stale on arrival. Each in-stock offer becomes one
+<p><code>gpuprov</code> queries <code>GET /api/v1/availability/gpus</code> live instead of shipping a
+static catalog. A marketplace's stock changes minute to minute, so a static
+catalog would be stale on arrival. Each in-stock offer becomes one
 candidate:</p>
 <ul>
 <li><code>instance_type</code> = <code>&lt;provider&gt;/&lt;cloudId&gt;</code> (e.g. <code>hyperstack/n3-H100x1</code>)</li>
@@ -1092,8 +1092,9 @@ A100 sizes, <code>H200</code> does not match <code>GH200</code>, and <code>A10</
   id per pod (<code>sshKeyId</code>), leaving the account's primary key alone. It then
   <strong>re-checks stock</strong> for that exact offer, so a stale plan fails before anything
   is created.</li>
-<li><code>create</code> posts <code>/pods</code> using the offer's own <code>socket</code> (SkyPilot hard-codes
-  <code>PCIe</code>, which is wrong for SXM offers), data center, security tier, and image.
+<li><code>create</code> posts <code>/pods</code> using the offer's own <code>socket</code> (SXM offers need the
+  right value; a fixed <code>PCIe</code> would be wrong for them), data center, security
+  tier, and image.
   Pods are named <code>gpuprov-&lt;name&gt;</code>.</li>
 </ul>
 <h2 id="ssh-and-kubernetes">SSH and Kubernetes<a class="headerlink" href="#ssh-and-kubernetes" title="Permanent link">&para;</a></h2>
@@ -1103,8 +1104,8 @@ and <code>--k8s</code> clusters use <a href="../../guides/kubernetes/#access-mod
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <p>These are declared as unsupported features and rejected up front: <code>--port</code>
 (no firewall API), <code>--image</code> (images come from the offer's environment list),
-and <code>--spot</code>. Pods can take up to about 16 minutes to become active; the boot
-timeout matches SkyPilot's.</p>
+and <code>--spot</code>. Pods can take up to about 16 minutes to become active, so the boot budget is
+16 minutes.</p>
 
 
 

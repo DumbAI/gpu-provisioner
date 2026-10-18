@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1047,7 +1047,7 @@ changes. Failover, retries, polling, deadlines, compensation, crash recovery, th
 journal, SSH, and k3s all come from the shared core.</p>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">CloudProvider</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">&#39;</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span><span class="w">                 </span><span class="c1">// &quot;mycloud&quot;: recorded on every VM row</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span><span class="w">                 </span><span class="c1">// "mycloud": recorded on every VM row</span>
 <span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">capabilities</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Capabilities</span><span class="p">;</span><span class="w">         </span><span class="c1">// unsupported features + timing hints</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">plan</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ResourceRequest</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Offer</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">prepare</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">offer</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Offer</span><span class="p">,</span><span class="w"> </span><span class="n">spec</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">InstanceSpec</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
@@ -1155,7 +1155,7 @@ it lives in your <code>error.rs</code>:</p>
 <h2 id="checklist">Checklist<a class="headerlink" href="#checklist" title="Permanent link">&para;</a></h2>
 <ol>
 <li><code>src/provider/&lt;id&gt;/mod.rs</code>, with <code>pub const PROVIDER_ID</code>, the provider struct, and
-   the trait impl. Cite the SkyPilot analog in the module doc if one exists.</li>
+   the trait impl. The module doc should map each primitive to the cloud API calls it makes.</li>
 <li>A config section in <code>config.rs</code>, and an arm in <code>AppConfig::default_regions</code> if
    your region names differ from AWS's.</li>
 <li>Register it in <code>provider::build</code> and <code>PROVIDER_IDS</code>.</li>

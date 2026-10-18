@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1015,22 +1015,22 @@
 
 
 <h1 id="gpuprov">gpuprov<a class="headerlink" href="#gpuprov" title="Permanent link">&para;</a></h1>
-<p><strong>A mini-SkyPilot in Rust.</strong> <code>gpuprov</code> provisions a GPU VM on the cheapest cloud
-offer that has capacity, waits until you can SSH in, and records it locally.
-Optionally it turns the VM into a single-node <strong>k3s</strong> cluster, so you can deploy
-containers with plain <code>kubectl</code>.</p>
+<p><strong>GPU machines with Kubernetes on them, from one command.</strong> <code>gpuprov</code> provisions
+a GPU VM on the cheapest cloud offer that has capacity, turns it into a
+single-node <strong>k3s</strong> cluster, waits until both SSH and the cluster are healthy,
+and records the result locally. You can then use it over plain SSH or deploy
+containers with <code>kubectl</code>.</p>
 <div class="highlight"><pre><span></span><code><span class="gp">$ </span>gpuprov<span class="w"> </span>provision<span class="w"> </span>--name<span class="w"> </span>dev<span class="w"> </span>--gpus<span class="w"> </span>L4:1<span class="w"> </span>--cloud<span class="w"> </span>gcp<span class="w"> </span>--region<span class="w"> </span>us-central1<span class="w"> </span>--region<span class="w"> </span>us-east1
-<span class="go">[dev] planning on gcp</span>
-<span class="go">[dev] preparing g2-standard-4@us-central1/us-central1-a</span>
-<span class="go">[dev] creating g2-standard-4@us-central1/us-central1-a</span>
-<span class="go">[dev] tearing down at us-central1/us-central1-a (Requesting) then next offer   # ZONE_RESOURCE_POOL_EXHAUSTED</span>
-<span class="go">[dev] preparing g2-standard-4@us-central1/us-central1-b</span>
-<span class="go">...</span>
-<span class="go">VM &#39;dev&#39; is UP</span>
+<span class="go">VM 'dev' is UP</span>
 <span class="go">  Endpoint:    ubuntu@34.122.x.x:22</span>
 <span class="go">  Connect:     gpuprov ssh dev    (or plain: ssh dev)</span>
 
+<span class="go">Kubernetes cluster 'gpuprov-dev' is ready.</span>
+<span class="go">  API:         https://34.122.x.x:6443</span>
+<span class="go">  Kubeconfig:  ~/.gpu-provisioner/kube/dev.yaml</span>
+
 <span class="gp">$ </span>gpuprov<span class="w"> </span>ssh<span class="w"> </span>dev<span class="w"> </span>--<span class="w"> </span>nvidia-smi
+<span class="gp">$ </span><span class="nv">KUBECONFIG</span><span class="o">=</span>~/.gpu-provisioner/kube/dev.yaml<span class="w"> </span>kubectl<span class="w"> </span>get<span class="w"> </span>nodes
 <span class="gp">$ </span>gpuprov<span class="w"> </span>down<span class="w"> </span>dev
 </code></pre></div>
 <h2 id="what-it-does">What it does<a class="headerlink" href="#what-it-does" title="Permanent link">&para;</a></h2>
@@ -1047,13 +1047,14 @@ containers with plain <code>kubectl</code>.</p>
   cleans up what the run created, and a crash resumes from the last state. It never
   creates a second instance, because every step observes the cloud before it acts.
   See <a href="architecture/state-machines/">State machines</a>.</li>
+<li><strong>Kubernetes by default.</strong> On clouds with cloud-init, k3s installs while the VM
+  boots. gpuprov then verifies that install over SSH and falls back to pushing the
+  installer itself when needed. GPU nodes get the NVIDIA runtime and device plugin,
+  and every cluster is validated before you get a kubeconfig.
+  <a href="guides/kubernetes/#turning-it-off">Opt out</a> with <code>--no-k8s</code>.</li>
 <li><strong>SSH-native.</strong> One local ed25519 key and a per-VM <code>~/.ssh/config</code> entry, so plain
   <code>ssh dev</code>, VS Code Remote, and <code>rsync</code> work.</li>
-<li><strong>Kubernetes when you want it.</strong> <code>--k8s</code> installs k3s over SSH, wires up the NVIDIA
-  device plugin on GPU nodes, validates the cluster, and writes a kubeconfig. It
-  uses a direct API endpoint on clouds that can open ports and an SSH tunnel on
-  clouds that can't.</li>
-<li><strong>No server.</strong> A single static binary with state in <code>~/.gpu-provisioner</code>.</li>
+<li><strong>No server.</strong> A single binary with state in <code>~/.gpu-provisioner</code>.</li>
 </ul>
 <h2 id="where-to-go-next">Where to go next<a class="headerlink" href="#where-to-go-next" title="Permanent link">&para;</a></h2>
 <table>
@@ -1077,7 +1078,7 @@ containers with plain <code>kubectl</code>.</p>
 <td><a href="guides/configuration/">Configuration</a></td>
 </tr>
 <tr>
-<td>run Kubernetes on the VM</td>
+<td>use or turn off the cluster</td>
 <td><a href="guides/kubernetes/">Kubernetes (k3s)</a></td>
 </tr>
 <tr>

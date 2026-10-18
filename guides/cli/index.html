@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1134,8 +1134,8 @@
 <p>Environment: <code>GPUPROV_HOME</code> relocates all local state, and <code>RUST_LOG=debug</code>
 gives verbose progress. Logs go to stderr and summaries to stdout.</p>
 <h2 id="gpuprov-provision"><code>gpuprov provision</code><a class="headerlink" href="#gpuprov-provision" title="Permanent link">&para;</a></h2>
-<p>Provision a VM and block until it is SSH-ready. With <code>--k8s</code>, it also blocks
-until the cluster is validated. Re-running the command with the same <code>--name</code>
+<p>Provision a VM and block until it is SSH-ready and, unless k3s is turned off,
+until its cluster is validated. Re-running the command with the same <code>--name</code>
 is idempotent: a running VM is verified and reused, and an interrupted run is
 resumed.</p>
 <table>
@@ -1196,7 +1196,11 @@ resumed.</p>
 </tr>
 <tr>
 <td><code>--k8s</code></td>
-<td>Install single-node k3s and write a kubeconfig (<a href="../kubernetes/">guide</a>).</td>
+<td>Require the k3s cluster. It's on by default; this re-enables it when the config turns it off, and it fails on clouds that can't host k3s (<a href="../kubernetes/">guide</a>).</td>
+</tr>
+<tr>
+<td><code>--no-k8s</code></td>
+<td>Plain VM: skip k3s.</td>
 </tr>
 <tr>
 <td><code>--retry-until-up</code></td>
@@ -1212,7 +1216,7 @@ rejected before anything is planned.</p>
 <span class="nt">gpus</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">L4:1</span>
 <span class="nt">regions</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">us-central1</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">us-east1</span><span class="p p-Indicator">]</span>
 <span class="nt">disk_gb</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">200</span>
-<span class="nt">kubernetes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="nt">kubernetes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># plain VM; omit to use the config default (on)</span>
 </code></pre></div>
 <h2 id="gpuprov-ssh-name-cmd"><code>gpuprov ssh &lt;NAME&gt; [-- CMD...]</code><a class="headerlink" href="#gpuprov-ssh-name-cmd" title="Permanent link">&para;</a></h2>
 <p>Opens an interactive shell, or runs one command and propagates its exit code.
@@ -1232,10 +1236,11 @@ resources (security group or firewall rule), and removes local SSH and kubeconfi
 files. Ctrl-C does not stop a teardown halfway; press it twice to force-exit, then
 re-run to resume.</p>
 <h2 id="gpuprov-kubeconfig-name"><code>gpuprov kubeconfig &lt;NAME&gt;</code><a class="headerlink" href="#gpuprov-kubeconfig-name" title="Permanent link">&para;</a></h2>
-<p>For <code>--k8s</code> VMs, re-runs the cluster steps (idempotent install, then API wait,
-kubeconfig fetch, and validation) and rewrites <code>~/.gpu-provisioner/kube/&lt;NAME&gt;.yaml</code>.</p>
+<p>For cluster VMs, re-runs the cluster steps (install check with SSH fallback, API
+wait, kubeconfig fetch, and validation) and rewrites
+<code>~/.gpu-provisioner/kube/&lt;NAME&gt;.yaml</code>.</p>
 <h2 id="gpuprov-tunnel-name"><code>gpuprov tunnel &lt;NAME&gt;</code><a class="headerlink" href="#gpuprov-tunnel-name" title="Permanent link">&para;</a></h2>
-<p>For clusters on clouds without inbound-port control (Prime Intellect, Docker),
+<p>For clusters on clouds without inbound-port control (Prime Intellect),
 forwards <code>127.0.0.1:16443</code> to the node's API server. The kubeconfig of such
 clusters already points there. Keep it running while you use <code>kubectl</code>.</p>
 

@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -935,7 +935,7 @@ local Docker daemon. It exists so the <strong>real</strong> state machines (jour
 failover bookkeeping, SSH probing, reuse, crash adoption, teardown) can run end
 to end without a cloud account. CI uses it the same way.</p>
 <div class="highlight"><pre><span></span><code>gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>docker<span class="w"> </span>--name<span class="w"> </span>demo<span class="w"> </span>--instance-type<span class="w"> </span>container
-gpuprov<span class="w"> </span>ssh<span class="w"> </span>demo<span class="w"> </span>--<span class="w"> </span><span class="s1">&#39;whoami &amp;&amp; sudo -n true &amp;&amp; echo ok&#39;</span>
+gpuprov<span class="w"> </span>ssh<span class="w"> </span>demo<span class="w"> </span>--<span class="w"> </span><span class="s1">'whoami &amp;&amp; sudo -n true &amp;&amp; echo ok'</span>
 gpuprov<span class="w"> </span>down<span class="w"> </span>demo
 </code></pre></div>
 <table>

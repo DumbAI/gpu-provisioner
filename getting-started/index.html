@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1080,7 +1080,8 @@ cargo<span class="w"> </span>install<span class="w"> </span>--path<span class="w
 On macOS and Linux it is already there.</p>
 <h2 id="try-it-without-a-cloud-account">Try it without a cloud account<a class="headerlink" href="#try-it-without-a-cloud-account" title="Permanent link">&para;</a></h2>
 <p>The <code>docker</code> cloud runs each "VM" as a local sshd container. It's the quickest way
-to see the whole lifecycle:</p>
+to see the whole lifecycle. Containers can't run k3s, so these come up as plain
+VMs:</p>
 <div class="highlight"><pre><span></span><code>gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>docker<span class="w"> </span>--name<span class="w"> </span>demo<span class="w"> </span>--instance-type<span class="w"> </span>container
 gpuprov<span class="w"> </span>ssh<span class="w"> </span>demo<span class="w"> </span>--<span class="w"> </span>uname<span class="w"> </span>-a
 gpuprov<span class="w"> </span>status<span class="w"> </span>demo<span class="w">        </span><span class="c1"># the journaled state transitions</span>
@@ -1108,7 +1109,9 @@ gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span cla
 <span class="c1"># Prime Intellect: the cheapest H100 offer anywhere in the marketplace</span>
 gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>primeintellect<span class="w"> </span>--name<span class="w"> </span>dev-pi<span class="w"> </span>--gpus<span class="w"> </span>H100:1
 </code></pre></div>
-<p>The command blocks until SSH works. Progress goes to stderr and the summary to stdout.</p>
+<p>Each VM is also a single-node k3s cluster by default. The command blocks until
+SSH works and the cluster is validated, then prints the kubeconfig path. Add
+<code>--no-k8s</code> for a plain VM. Progress goes to stderr and the summary to stdout.</p>
 </li>
 <li>
 <p><strong>Use it.</strong></p>

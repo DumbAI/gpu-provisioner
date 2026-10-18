@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1002,11 +1002,18 @@ shows how the clouds differ.</p>
 <td><code>ubuntu</code> / random local port</td>
 </tr>
 <tr>
-<td><code>--port</code>, <code>--k8s</code> direct API</td>
+<td>k3s (default on)</td>
+<td>✓, installed at boot</td>
+<td>✓, installed at boot</td>
+<td>✓, installed over SSH</td>
+<td>✗ (skipped)</td>
+</tr>
+<tr>
+<td><code>--port</code>, direct k8s API</td>
 <td>✓ (security group)</td>
 <td>✓ (firewall rule)</td>
 <td>✗ (k8s uses SSH tunnel)</td>
-<td>✗ (VM lifecycle only)</td>
+<td>✗</td>
 </tr>
 <tr>
 <td><code>--spot</code></td>

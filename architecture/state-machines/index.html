@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="A mini-SkyPilot in Rust — provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and optional single-node k3s.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -1233,8 +1233,8 @@
 <strong>Scope:</strong> the VM lifecycle state machine (launch, teardown), the k3s cluster state machine layered on it, and the provider contract that AWS, Prime Intellect, GCP and the Docker test cloud implement.</p>
 <hr />
 <h2 id="1-review-of-the-previous-design">1. Review of the previous design<a class="headerlink" href="#1-review-of-the-previous-design" title="Permanent link">&para;</a></h2>
-<p>The previous pipeline (<code>orchestrator.rs</code> → <code>failover.rs</code> → <code>CloudProvider</code>) was a faithful,
-readable port of SkyPilot's <code>provision_with_retries</code>, with a sound error taxonomy. Its
+<p>The previous pipeline (<code>orchestrator.rs</code> → <code>failover.rs</code> → <code>CloudProvider</code>) was a readable
+plan → provision-with-failover → wait-for-SSH sequence with a sound error taxonomy. Its
 weaknesses showed up as soon as a second, differently-shaped cloud (Prime Intellect) was
 attempted:</p>
 <table>
@@ -1320,7 +1320,7 @@ attempted:</p>
 </tr>
 <tr>
 <td>Passing offer details from plan to launch</td>
-<td>Encode in the instance-type string (SkyPilot PI: <code>a__b__c__d</code>) · adapter-side cache · <strong>opaque <code>detail</code> JSON on the <code>Offer</code>, persisted</strong></td>
+<td>Encode in the instance-type string (e.g. <code>provider__gpu__cpu__mem</code>) · adapter-side cache · <strong>opaque <code>detail</code> JSON on the <code>Offer</code>, persisted</strong></td>
 <td>Persisted JSON survives crashes, keeps the core cloud-agnostic, and avoids string parsing.</td>
 </tr>
 <tr>
@@ -1330,8 +1330,13 @@ attempted:</p>
 </tr>
 <tr>
 <td>k3s installer delivery</td>
-<td>cloud-init at boot · <strong>push over SSH after <code>Ready</code></strong></td>
-<td>SSH push works on every cloud (Prime Intellect has no cloud-init), is observable and retryable as its own state, and works on reused VMs. Cost: the install runs after SSH is up instead of during boot, roughly 1–2 minutes slower.</td>
+<td>cloud-init at boot only · SSH push after <code>Ready</code> only · <strong>boot first, verified over SSH, SSH push as fallback</strong></td>
+<td>Boot delivery overlaps the install with the SSH wait (about 1–2 minutes faster) but is unobservable and exists only on cloud-init clouds. SSH push works everywhere and is retryable, but is serial. The hybrid gets both: <code>CheckingBootInstall</code> reads the installer's status marker and pushes over SSH only when the boot route is missing (no cloud-init, reused VM), failed, or ran too long. A host-wide lock and an idempotent installer make the two routes safe to overlap.</td>
+</tr>
+<tr>
+<td>k3s by default</td>
+<td>opt-in <code>--k8s</code> · <strong>on by default, opt out with <code>--no-k8s</code> / <code>[defaults] kubernetes = false</code></strong></td>
+<td>Every VM is a ready cluster. The default is skipped, with a note, on clouds that cannot host k3s (<code>Feature::Kubernetes</code> unsupported, e.g. Docker); an explicit <code>--k8s</code> there is rejected up front.</td>
 </tr>
 <tr>
 <td>k3s API access</td>
@@ -1358,7 +1363,7 @@ attempted:</p>
 <h3 id="41-the-provider-contract-providermodrs">4.1 The provider contract (<code>provider/mod.rs</code>)<a class="headerlink" href="#41-the-provider-contract-providermodrs" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">CloudProvider</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">&#39;</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span>
+<span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">name</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span>
 <span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">capabilities</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Capabilities</span><span class="p">;</span><span class="w">                       </span><span class="c1">// unsupported features, boot timeout, poll interval</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">plan</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">ResourceRequest</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Offer</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">prepare</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">offer</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Offer</span><span class="p">,</span><span class="w"> </span><span class="n">spec</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">InstanceSpec</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">serde_json</span><span class="p">::</span><span class="n">Value</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
@@ -1452,7 +1457,7 @@ attempted:</p>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
 <span class="k">pub</span><span class="w"> </span><span class="k">trait</span><span class="w"> </span><span class="n">Machine</span><span class="p">:</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="k">type</span><span class="w"> </span><span class="nc">State</span><span class="p">:</span><span class="w"> </span><span class="nc">Serialize</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">DeserializeOwned</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Clone</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">Debug</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Send</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">Sync</span><span class="p">;</span>
-<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">KIND</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">&#39;</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="n">KIND</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="o">'</span><span class="nb">static</span><span class="w"> </span><span class="kt">str</span><span class="p">;</span>
 <span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">is_terminal</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Self</span><span class="p">::</span><span class="n">State</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="kt">bool</span><span class="p">;</span>
 <span class="w">    </span><span class="k">fn</span><span class="w"> </span><span class="nf">label</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Self</span><span class="p">::</span><span class="n">State</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">String</span><span class="p">;</span><span class="w">                       </span><span class="c1">// journal / progress line</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Self</span><span class="p">::</span><span class="n">State</span><span class="p">,</span><span class="w"> </span><span class="n">cx</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">StepCx</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Step</span><span class="o">&lt;</span><span class="bp">Self</span><span class="p">::</span><span class="n">State</span><span class="o">&gt;</span><span class="p">;</span>
@@ -1505,21 +1510,27 @@ attempted:</p>
 <h3 id="45-k3s-cluster-machine-clusterk3srs">4.5 k3s cluster machine (<code>cluster/k3s.rs</code>)<a class="headerlink" href="#45-k3s-cluster-machine-clusterk3srs" title="Permanent link">&para;</a></h3>
 <pre class="mermaid"><code>stateDiagram-v2
     [*] --&gt; Vm
-    Vm --&gt; Installing: child LaunchMachine Ready
+    Vm --&gt; CheckingBootInstall: child LaunchMachine Ready
     Vm --&gt; Failed: child Exhausted / Aborted / Leaked
+    CheckingBootInstall --&gt; CheckingBootInstall: boot install running (poll, ≤ 15 min)
+    CheckingBootInstall --&gt; AwaitingApi: installed at boot
+    CheckingBootInstall --&gt; Installing: not installed / failed / timed out / GPU missed
     Installing --&gt; AwaitingApi: installer pushed over SSH (idempotent)
     AwaitingApi --&gt; FetchingKubeconfig: /readyz ok
     FetchingKubeconfig --&gt; Validating: kubeconfig written (Direct or SshTunnel)
-    Validating --&gt; Ready: node Ready, CoreDNS up, GPU allocatable (GPU nodes), API reachable via access path
+    Validating --&gt; Validating: API cert lacks public host → re-run installer with SAN (once)
+    Validating --&gt; Ready: node Ready, CoreDNS up, GPU allocatable, cert SAN ok, API reachable
     Installing --&gt; Failed: retries exhausted
     AwaitingApi --&gt; Failed: timeout
     Validating --&gt; Failed: timeout
     Ready --&gt; [*]
     Failed --&gt; [*]</code></pre>
 <ul>
-<li><strong>Composition.</strong> <code>K3sState::Vm(LaunchState)</code> delegates <code>step</code> to the child machine and lifts its result. A child terminal <code>Ready(vm)</code> becomes <code>Installing { vm }</code>. One journal row per VM name holds the whole nested state.</li>
+<li><strong>Boot first, SSH as fallback.</strong> On clouds whose capabilities report <code>cloud_init</code>, <code>K3sMachine::new</code> appends the installer to the VM's user data, so k3s installs while the VM boots. The installer serializes on a host-wide <code>flock</code>, records <code>state=running|done|failed</code> in <code>/var/lib/gpuprov/k3s-install.status</code>, and owns <code>/etc/rancher/k3s/config.yaml</code> (re-rendered from a SAN list, restarting k3s only when it changes). <code>CheckingBootInstall</code> reads the marker plus <code>cloud-init status</code>, the k3s unit state, and GPU presence in one SSH round trip. A pure decision table (<code>kube::BootProbe::decide</code>) maps that to <em>installed</em>, <em>wait</em>, or <em>fall back to SSH</em>.</li>
+<li><strong>TLS SAN.</strong> At boot the installer learns the public IP from the AWS/GCP metadata services. If that fails, <code>Validating</code> sees the API certificate doesn't cover the public host and re-runs the installer once with the SAN.</li>
+<li><strong>Composition.</strong> <code>K3sState::Vm(LaunchState)</code> delegates <code>step</code> to the child machine and lifts its result. A child terminal <code>Ready(vm)</code> becomes <code>CheckingBootInstall { vm }</code>. One journal row per VM name holds the whole nested state.</li>
 <li><strong>Access mode.</strong> <code>Direct</code> (the cloud opens 6443/80/443) or <code>SshTunnel</code> (<code>gpuprov tunnel &lt;name&gt;</code> forwards <code>127.0.0.1:6443</code>). The choice comes from provider capabilities, so k3s works on Prime Intellect.</li>
-<li><strong>Failure policy.</strong> k3s failures leave the VM up (<code>Failed { vm }</code>) for debugging. <code>gpuprov down</code> removes it, and <code>gpuprov provision --k8s</code> re-enters at <code>Installing</code>.</li>
+<li><strong>Failure policy.</strong> k3s failures leave the VM up (<code>Failed { vm }</code>) for debugging. <code>gpuprov down</code> removes it, and re-running <code>gpuprov provision</code> reuses the VM and re-enters at <code>CheckingBootInstall</code>.</li>
 </ul>
 <h2 id="5-adapters">5. Adapters<a class="headerlink" href="#5-adapters" title="Permanent link">&para;</a></h2>
 <table>
@@ -1580,7 +1591,14 @@ attempted:</p>
 <td>—</td>
 <td>ports, image, spot</td>
 <td>—</td>
-<td>ports, image, spot</td>
+<td>ports, image, spot, Kubernetes</td>
+</tr>
+<tr>
+<td><code>cloud_init</code> (k3s at boot)</td>
+<td>✓</td>
+<td>✗ (SSH route)</td>
+<td>✓</td>
+<td>✗</td>
 </tr>
 </tbody>
 </table>
