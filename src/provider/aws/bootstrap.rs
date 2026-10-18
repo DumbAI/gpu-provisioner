@@ -1,8 +1,6 @@
 //! Region-level bootstrap: instance-type viability, AMI, default-VPC public
-//! subnets, per-VM security group. A port of SkyPilot's
-//! `sky/provision/aws/config.py` `bootstrap_instances`, minus IAM (no on-VM
-//! agent → no instance profile), plus the zone-availability filtering SkyPilot
-//! gets from its catalog (`valid_on_region_zones`).
+//! subnets restricted to zones that offer the type, per-VM security group.
+//! No IAM: there is no on-VM agent, so instances get no instance profile.
 //!
 //! Ordering is cheapest-check-first so a non-viable region fails over cleanly
 //! before anything is created: instance-type metadata → zone offerings → AMI
@@ -14,15 +12,17 @@ use aws_sdk_ec2::types::{
     IpPermission, IpRange, ResourceType, RouteTable, SubnetState, Tag, TagSpecification,
 };
 
-use crate::provider::{ProvisionError, ProvisionRequest};
+use serde::{Deserialize, Serialize};
+
+use crate::provider::{BlockScope, InstanceSpec, Offer, ProviderError};
 
 use super::instance::TAG_MANAGED;
 use super::{ami, error, filter, instance_type};
 
-/// AWS region prerequisites resolved by `bootstrap`, consumed by
-/// `run_instance`. AWS-shaped and kept below the trait — the engine treats
-/// provisioning as one opaque step.
-#[derive(Debug, Clone)]
+/// AWS region prerequisites resolved by `bootstrap` (`CloudProvider::prepare`)
+/// and consumed by `create`. Serialized into the launch journal as the
+/// provider-private `prepared` value — the core never looks inside.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bootstrapped {
     /// Usable public subnets offering the instance type, one per zone.
     pub subnets: Vec<SubnetInfo>,
@@ -32,7 +32,7 @@ pub struct Bootstrapped {
     pub root_device_name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubnetInfo {
     pub subnet_id: String,
     pub zone: String,
@@ -41,39 +41,38 @@ pub struct SubnetInfo {
 pub async fn bootstrap(
     ec2: &aws_sdk_ec2::Client,
     ssm: &aws_sdk_ssm::Client,
-    req: &ProvisionRequest,
-) -> Result<Bootstrapped, ProvisionError> {
-    let region = &req.region;
+    offer: &Offer,
+    spec: &InstanceSpec,
+) -> Result<Bootstrapped, ProviderError> {
+    let region = &offer.region;
+    let instance_type = &offer.instance_type;
 
     // 1+2. Instance-type metadata (decides AMI flavor) and the zones offering
     //      it — independent, so query concurrently.
     let (meta, offering_zones) = tokio::try_join!(
-        instance_type::instance_type_meta(ec2, region, &req.instance_type),
-        instance_type::zones_offering(ec2, region, &req.instance_type),
+        instance_type::instance_type_meta(ec2, region, instance_type),
+        instance_type::zones_offering(ec2, instance_type),
     )?;
     tracing::info!(
         "[{region}] {}: {}, {}",
-        req.instance_type,
+        instance_type,
         meta.gpu_desc.as_deref().unwrap_or("no GPU"),
         meta.arch.as_str()
     );
     if offering_zones.is_empty() {
-        return Err(ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!(
-                "instance type '{}' is not offered in this region",
-                req.instance_type
-            ),
-        });
+        return Err(ProviderError::unavailable(format!(
+            "instance type '{}' is not offered in this region",
+            instance_type
+        )));
     }
 
     // 3. AMI: default via SSM (or user override), then per-image facts.
-    let ami_id = match &req.image_id {
+    let ami_id = match &spec.image_id {
         Some(image) => image.clone(),
-        None => ami::resolve_ami(ssm, region, meta.arch, meta.is_gpu).await?,
+        None => ami::resolve_ami(ssm, meta.arch, meta.is_gpu).await?,
     };
-    let resolved = ami::describe_ami(ec2, region, &ami_id).await?;
-    check_min_disk(region, &resolved, req.disk_gb)?;
+    let resolved = ami::describe_ami(ec2, &ami_id).await?;
+    check_min_disk(&resolved, spec.disk_gb)?;
     tracing::info!(
         "[{region}] using AMI {} (root device {}, min disk {} GB)",
         resolved.ami_id,
@@ -82,13 +81,13 @@ pub async fn bootstrap(
     );
 
     // 4. Network: default-VPC public subnets, restricted to offering zones.
-    let vpc_id = default_vpc_id(ec2, region).await?;
-    let subnets = public_subnets(ec2, region, &vpc_id, req.zone.as_deref()).await?;
-    let subnets = filter_to_offering_zones(subnets, &offering_zones, region, &req.instance_type)?;
+    let vpc_id = default_vpc_id(ec2).await?;
+    let subnets = public_subnets(ec2, &vpc_id, offer.zone.as_deref()).await?;
+    let subnets = filter_to_offering_zones(subnets, &offering_zones, instance_type)?;
     tracing::info!(
         "[{region}] default VPC {vpc_id}, {} public subnet(s) offering {}: {}",
         subnets.len(),
-        req.instance_type,
+        instance_type,
         subnets
             .iter()
             .map(|s| s.zone.as_str())
@@ -97,7 +96,8 @@ pub async fn bootstrap(
     );
 
     // 5. Security group — only created once the region is known to be viable.
-    let security_group_id = ensure_security_group(ec2, region, &vpc_id, req).await?;
+    let security_group_id =
+        ensure_security_group(ec2, &vpc_id, &spec.vm_name, &spec.open_ports).await?;
     tracing::info!("[{region}] security group ready: {security_group_id}");
 
     Ok(Bootstrapped {
@@ -108,22 +108,15 @@ pub async fn bootstrap(
     })
 }
 
-/// The AMI's root snapshot is the smallest legal root disk (SkyPilot errors
-/// the same way rather than silently billing a bigger disk).
-fn check_min_disk(
-    region: &str,
-    resolved: &ami::ResolvedAmi,
-    requested_gb: i32,
-) -> Result<(), ProvisionError> {
+/// The AMI's root snapshot is the smallest legal root disk; error out rather
+/// than silently billing a bigger disk.
+fn check_min_disk(resolved: &ami::ResolvedAmi, requested_gb: i32) -> Result<(), ProviderError> {
     if requested_gb < resolved.min_disk_gb {
-        return Err(ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!(
-                "AMI {} requires a root disk of at least {} GB but {} GB was requested; \
+        return Err(ProviderError::unavailable(format!(
+            "AMI {} requires a root disk of at least {} GB but {} GB was requested; \
                  pass --disk {} (or larger)",
-                resolved.ami_id, resolved.min_disk_gb, requested_gb, resolved.min_disk_gb
-            ),
-        });
+            resolved.ami_id, resolved.min_disk_gb, requested_gb, resolved.min_disk_gb
+        )));
     }
     Ok(())
 }
@@ -132,48 +125,46 @@ fn check_min_disk(
 fn filter_to_offering_zones(
     subnets: Vec<SubnetInfo>,
     offering_zones: &HashSet<String>,
-    region: &str,
     instance_type: &str,
-) -> Result<Vec<SubnetInfo>, ProvisionError> {
+) -> Result<Vec<SubnetInfo>, ProviderError> {
     let (kept, dropped): (Vec<_>, Vec<_>) = subnets
         .into_iter()
         .partition(|s| offering_zones.contains(&s.zone));
     if kept.is_empty() {
         let mut offered: Vec<&str> = offering_zones.iter().map(String::as_str).collect();
         offered.sort_unstable();
-        return Err(ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!(
-                "'{instance_type}' is offered in zone(s) [{}] but there is no usable \
+        return Err(ProviderError::unavailable(format!(
+            "'{instance_type}' is offered in zone(s) [{}] but there is no usable \
                  public subnet there (subnets exist in: [{}])",
-                offered.join(", "),
-                dropped
-                    .iter()
-                    .map(|s| s.zone.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        });
+            offered.join(", "),
+            dropped
+                .iter()
+                .map(|s| s.zone.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
     Ok(kept)
 }
 
-async fn default_vpc_id(ec2: &aws_sdk_ec2::Client, region: &str) -> Result<String, ProvisionError> {
+async fn default_vpc_id(ec2: &aws_sdk_ec2::Client) -> Result<String, ProviderError> {
     let resp = ec2
         .describe_vpcs()
         .filters(filter("isDefault", "true"))
         .send()
         .await
-        .map_err(error::in_bootstrap(region))?;
+        .map_err(error::in_bootstrap)?;
     resp.vpcs()
         .first()
         .and_then(|v| v.vpc_id())
         .map(str::to_string)
-        .ok_or_else(|| ProvisionError::Config {
-            region: region.to_string(),
-            msg: "no default VPC in this region; create one (VPC console → Actions → \
+        .ok_or_else(|| {
+            ProviderError::unavailable(
+                "no default VPC in this region; create one (VPC console → Actions → \
                   Create default VPC) or use another region"
-                .to_string(),
+                    .to_string(),
+            )
+            .with_block(BlockScope::Region)
         })
 }
 
@@ -182,10 +173,9 @@ async fn default_vpc_id(ec2: &aws_sdk_ec2::Client, region: &str) -> Result<Strin
 /// the zone pin if any. Sorted by zone for deterministic retry order.
 async fn public_subnets(
     ec2: &aws_sdk_ec2::Client,
-    region: &str,
     vpc_id: &str,
     zone_pin: Option<&str>,
-) -> Result<Vec<SubnetInfo>, ProvisionError> {
+) -> Result<Vec<SubnetInfo>, ProviderError> {
     // Subnets and route tables are independent lookups — fetch concurrently.
     let (subnets_resp, tables_resp) = tokio::try_join!(
         async {
@@ -193,14 +183,14 @@ async fn public_subnets(
                 .filters(filter("vpc-id", vpc_id))
                 .send()
                 .await
-                .map_err(error::in_bootstrap(region))
+                .map_err(error::in_bootstrap)
         },
         async {
             ec2.describe_route_tables()
                 .filters(filter("vpc-id", vpc_id))
                 .send()
                 .await
-                .map_err(error::in_bootstrap(region))
+                .map_err(error::in_bootstrap)
         },
     )?;
 
@@ -246,13 +236,11 @@ async fn public_subnets(
         let zone_note = zone_pin
             .map(|pin| format!(" in zone {pin}"))
             .unwrap_or_default();
-        return Err(ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!(
-                "no available public subnet in default VPC {vpc_id}{zone_note} \
+        return Err(ProviderError::unavailable(format!(
+            "no available public subnet in default VPC {vpc_id}{zone_note} \
                  (public = route table has an internet-gateway route)"
-            ),
-        });
+        ))
+        .with_block(BlockScope::Region));
     }
     Ok(usable)
 }
@@ -269,22 +257,19 @@ fn is_public_table(table: &RouteTable) -> bool {
 /// group has none (idempotent re-provision).
 async fn ensure_security_group(
     ec2: &aws_sdk_ec2::Client,
-    region: &str,
     vpc_id: &str,
-    req: &ProvisionRequest,
-) -> Result<String, ProvisionError> {
-    let sg_name = security_group_name(&req.vm_name);
+    vm_name: &str,
+    open_ports: &[u16],
+) -> Result<String, ProviderError> {
+    let sg_name = security_group_name(vm_name);
 
-    let mut existing = find_security_group(ec2, region, vpc_id, &sg_name).await?;
+    let mut existing = find_security_group(ec2, vpc_id, &sg_name).await?;
     if existing.is_none() {
         let create = ec2
             .create_security_group()
             .group_name(&sg_name)
             // Note: EC2 SG descriptions forbid quote characters.
-            .description(format!(
-                "gpuprov managed security group for VM {}",
-                req.vm_name
-            ))
+            .description(format!("gpuprov managed security group for VM {vm_name}"))
             .vpc_id(vpc_id)
             .tag_specifications(
                 TagSpecification::builder()
@@ -298,18 +283,19 @@ async fn ensure_security_group(
             Ok(_) => {}
             // Lost a create race — the refetch below picks it up.
             Err(e) if error::has_code(&e, "InvalidGroup.Duplicate") => {}
-            Err(e) => return Err(error::in_bootstrap(region)(e)),
+            Err(e) => return Err(error::in_bootstrap(e)),
         }
-        existing = find_security_group(ec2, region, vpc_id, &sg_name).await?;
+        existing = find_security_group(ec2, vpc_id, &sg_name).await?;
     }
-    let (sg_id, rule_count) = existing.ok_or_else(|| ProvisionError::Config {
-        region: region.to_string(),
-        msg: format!("security group '{sg_name}' not found after creation"),
+    let (sg_id, rule_count) = existing.ok_or_else(|| {
+        ProviderError::unavailable(format!(
+            "security group '{sg_name}' not found after creation"
+        ))
     })?;
 
     if rule_count == 0 {
         let mut ports: Vec<u16> = vec![22];
-        ports.extend(&req.extra_ports);
+        ports.extend(open_ports);
         ports.sort_unstable();
         ports.dedup();
         let mut auth = ec2.authorize_security_group_ingress().group_id(&sg_id);
@@ -327,7 +313,7 @@ async fn ensure_security_group(
             Ok(_) => {}
             // Raced with a concurrent authorize — rules exist, which is what we want.
             Err(e) if error::has_code(&e, "InvalidPermission.Duplicate") => {}
-            Err(e) => return Err(error::in_bootstrap(region)(e)),
+            Err(e) => return Err(error::in_bootstrap(e)),
         }
     }
     Ok(sg_id)
@@ -340,17 +326,16 @@ pub fn security_group_name(vm_name: &str) -> String {
 /// Returns `(group_id, ingress_rule_count)` if the group exists in the VPC.
 async fn find_security_group(
     ec2: &aws_sdk_ec2::Client,
-    region: &str,
     vpc_id: &str,
     sg_name: &str,
-) -> Result<Option<(String, usize)>, ProvisionError> {
+) -> Result<Option<(String, usize)>, ProviderError> {
     let resp = ec2
         .describe_security_groups()
         .filters(filter("group-name", sg_name))
         .filters(filter("vpc-id", vpc_id))
         .send()
         .await
-        .map_err(error::in_bootstrap(region))?;
+        .map_err(error::in_bootstrap)?;
     Ok(resp.security_groups().first().and_then(|sg| {
         sg.group_id()
             .map(|id| (id.to_string(), sg.ip_permissions().len()))
@@ -360,6 +345,7 @@ async fn find_security_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ErrorKind;
 
     fn subnet(id: &str, zone: &str) -> SubnetInfo {
         SubnetInfo {
@@ -379,7 +365,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let kept = filter_to_offering_zones(subnets, &offered, "us-east-2", "g6e.8xlarge").unwrap();
+        let kept = filter_to_offering_zones(subnets, &offered, "g6e.8xlarge").unwrap();
         let zones: Vec<&str> = kept.iter().map(|s| s.zone.as_str()).collect();
         assert_eq!(zones, vec!["us-east-2a", "us-east-2c"]);
     }
@@ -388,15 +374,10 @@ mod tests {
     fn offering_filter_errors_when_no_overlap() {
         let subnets = vec![subnet("s-a", "us-east-2a")];
         let offered: HashSet<String> = ["us-east-2b".to_string()].into_iter().collect();
-        let err =
-            filter_to_offering_zones(subnets, &offered, "us-east-2", "g6e.8xlarge").unwrap_err();
-        match err {
-            ProvisionError::Config { msg, .. } => {
-                assert!(msg.contains("us-east-2b"), "{msg}");
-                assert!(msg.contains("us-east-2a"), "{msg}");
-            }
-            other => panic!("expected Config, got {other:?}"),
-        }
+        let err = filter_to_offering_zones(subnets, &offered, "g6e.8xlarge").unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unavailable);
+        assert!(err.msg.contains("us-east-2b"), "{}", err.msg);
+        assert!(err.msg.contains("us-east-2a"), "{}", err.msg);
     }
 
     #[test]
@@ -406,9 +387,9 @@ mod tests {
             root_device_name: "/dev/sda1".into(),
             min_disk_gb: 75,
         };
-        assert!(check_min_disk("us-east-2", &resolved, 100).is_ok());
-        assert!(check_min_disk("us-east-2", &resolved, 75).is_ok());
-        let err = check_min_disk("us-east-2", &resolved, 50).unwrap_err();
+        assert!(check_min_disk(&resolved, 100).is_ok());
+        assert!(check_min_disk(&resolved, 75).is_ok());
+        let err = check_min_disk(&resolved, 50).unwrap_err();
         assert!(err.to_string().contains("--disk 75"), "{err}");
     }
 }

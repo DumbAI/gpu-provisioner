@@ -1,6 +1,5 @@
 //! Local SSH identity: a single ed25519 keypair generated once and reused for
-//! every VM (the mini analog of SkyPilot's `~/.sky/.../ssh/sky-key`, which is
-//! RSA-2048 for legacy reasons; ed25519 is the modern default).
+//! every VM (ed25519: small, fast, and the modern default).
 
 use std::path::{Path, PathBuf};
 

@@ -4,7 +4,7 @@
 //! mapping is AWS's own here.
 
 use crate::provider::{
-    expand_candidates, Candidate, GpuRequest, ProvisionError, ResourceAsk, ResourceRequest,
+    expand_offers, GpuRequest, Offer, ProviderError, ResourceAsk, ResourceRequest,
 };
 
 /// One GPU/count ask can be satisfied by several EC2 types that differ only
@@ -39,31 +39,31 @@ const OFFERINGS: &[AwsGpuOffering] = &[
 ];
 
 /// All EC2 instance types satisfying a GPU ask, cheapest first.
-pub fn instance_types_for(gpus: &GpuRequest) -> Result<Vec<String>, ProvisionError> {
+pub fn instance_types_for(gpus: &GpuRequest) -> Result<Vec<String>, ProviderError> {
     OFFERINGS
         .iter()
         .find(|o| o.gpu == gpus.name && o.count == gpus.count)
         .map(|o| o.instance_types.iter().map(|t| t.to_string()).collect())
-        .ok_or_else(|| ProvisionError::InvalidRequest {
-            msg: format!(
+        .ok_or_else(|| {
+            ProviderError::invalid(format!(
                 "no AWS instance type known for GPU '{gpus}'; available: {}",
                 OFFERINGS
                     .iter()
                     .map(|o| format!("{}:{}", o.gpu, o.count))
                     .collect::<Vec<_>>()
                     .join(", ")
-            ),
+            ))
         })
 }
 
 /// Resolve the resource ask into AWS instance types, then expand over the
-/// candidate regions/zone.
-pub fn plan_candidates(request: &ResourceRequest) -> Result<Vec<Candidate>, ProvisionError> {
+/// candidate regions/zone (AWS requires an explicit region list).
+pub fn plan(request: &ResourceRequest) -> Result<Vec<Offer>, ProviderError> {
     let instance_types = match &request.ask {
         ResourceAsk::InstanceType(instance_type) => vec![instance_type.clone()],
         ResourceAsk::Gpus(gpus) => instance_types_for(gpus)?,
     };
-    expand_candidates(&instance_types, &request.regions, request.zone.as_deref())
+    expand_offers(&instance_types, &request.regions, request.zone.as_deref())
 }
 
 #[cfg(test)]
@@ -93,7 +93,13 @@ mod tests {
     #[test]
     fn unknown_gpu_is_invalid_request() {
         let err = instance_types_for(&gpu("B200", 1)).unwrap_err();
-        assert!(matches!(err, ProvisionError::InvalidRequest { .. }));
+        assert!(matches!(
+            err,
+            ProviderError {
+                kind: crate::provider::ErrorKind::InvalidRequest,
+                ..
+            }
+        ));
         assert!(err.to_string().contains("available:"), "{err}");
     }
 
@@ -103,8 +109,9 @@ mod tests {
             ask: ResourceAsk::Gpus(gpu("L40S", 4)),
             regions: vec!["us-east-2".into(), "us-west-2".into()],
             zone: None,
+            spot: false,
         };
-        let rendered: Vec<String> = plan_candidates(&request)
+        let rendered: Vec<String> = plan(&request)
             .unwrap()
             .iter()
             .map(|c| c.to_string())

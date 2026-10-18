@@ -1,5 +1,4 @@
-//! Execute commands on a VM over SSH — the mini analog of SkyPilot's
-//! `SSHCommandRunner`. Uses the system OpenSSH binary: it gives us a real
+//! Execute commands on a VM over SSH, using the system OpenSSH binary: it gives us a real
 //! interactive TTY, ControlMaster multiplexing, and the user's ProxyCommand
 //! ecosystem for free.
 
@@ -54,6 +53,26 @@ pub async fn run_command_capture(
 pub fn exec_interactive(user: &str, host: &str, opts: &SshOptions) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let args = ssh_target_args(user, host, opts);
+    std::process::Command::new("ssh").args(&args).exec()
+}
+
+/// Replace this process with a foreground `ssh -N -L` port forward
+/// (`127.0.0.1:<local_port>` → `<remote_port>` on the VM's loopback).
+/// Returns only on spawn failure.
+pub fn exec_forward(
+    user: &str,
+    host: &str,
+    opts: &SshOptions,
+    local_port: u16,
+    remote_port: u16,
+) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut args = vec![
+        "-N".to_string(),
+        "-L".to_string(),
+        format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+    ];
+    args.extend(ssh_target_args(user, host, opts));
     std::process::Command::new("ssh").args(&args).exec()
 }
 

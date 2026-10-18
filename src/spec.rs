@@ -1,6 +1,5 @@
 //! `VmSpec`: the user's request — from a YAML file, CLI flags, or both
-//! (flags override the file). The mini analog of SkyPilot's task YAML +
-//! CLI overrides.
+//! (flags override the file).
 
 use std::path::Path;
 
@@ -10,6 +9,8 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub name: Option<String>,
+    /// Cloud provider id (`aws`, `primeintellect`); defaults to AWS.
+    pub cloud: Option<String>,
     /// Exact cloud instance type (e.g. `g5.xlarge`). Mutually exclusive with `gpus`.
     pub instance_type: Option<String>,
     /// GPU shorthand (e.g. `A10G:1`), resolved by the cloud provider's
@@ -25,10 +26,10 @@ pub struct VmSpec {
     pub disk_gb: Option<i32>,
     #[serde(default)]
     pub spot: bool,
-    /// Install a single-node k3s cluster on the VM (via cloud-init) and open
-    /// the Kubernetes API + ingress ports (6443/80/443).
-    #[serde(default)]
-    pub kubernetes: bool,
+    /// Make the VM a single-node k3s cluster. `None` = the config default
+    /// (`[defaults] kubernetes`, on unless disabled); an explicit `true` is a
+    /// hard requirement, an explicit `false` opts out.
+    pub kubernetes: Option<bool>,
     /// Extra security-group ingress ports besides SSH (22).
     #[serde(default)]
     pub ports: Vec<u16>,
@@ -39,6 +40,7 @@ pub struct VmSpec {
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
     pub name: Option<String>,
+    pub cloud: Option<String>,
     pub instance_type: Option<String>,
     pub gpus: Option<String>,
     pub regions: Vec<String>,
@@ -46,7 +48,8 @@ pub struct CliOverrides {
     pub ami: Option<String>,
     pub disk_gb: Option<i32>,
     pub spot: bool,
-    pub kubernetes: bool,
+    /// `Some(true)` for `--k8s`, `Some(false)` for `--no-k8s`.
+    pub kubernetes: Option<bool>,
     pub ports: Vec<u16>,
     pub ssh_user: Option<String>,
 }
@@ -88,6 +91,9 @@ impl VmSpec {
         if cli.name.is_some() {
             self.name = cli.name;
         }
+        if cli.cloud.is_some() {
+            self.cloud = cli.cloud;
+        }
         if cli.instance_type.is_some() {
             self.instance_type = cli.instance_type;
             self.gpus = None; // an explicit instance type overrides a file's gpus
@@ -109,7 +115,9 @@ impl VmSpec {
             self.disk_gb = cli.disk_gb;
         }
         self.spot |= cli.spot;
-        self.kubernetes |= cli.kubernetes;
+        if cli.kubernetes.is_some() {
+            self.kubernetes = cli.kubernetes;
+        }
         if !cli.ports.is_empty() {
             self.ports = cli.ports;
         }
@@ -117,6 +125,14 @@ impl VmSpec {
             self.ssh_user = cli.ssh_user;
         }
         self
+    }
+
+    /// The provider id this spec targets (lowercased; default AWS).
+    pub fn cloud_id(&self) -> String {
+        self.cloud
+            .as_deref()
+            .map(str::to_lowercase)
+            .unwrap_or_else(|| crate::provider::DEFAULT_PROVIDER.to_string())
     }
 
     /// Validate and normalize the VM name (the identity used for cloud tags,
@@ -137,9 +153,9 @@ impl VmSpec {
     }
 }
 
-/// Lowercase and map `_`/`.` to `-` (mirrors SkyPilot's
-/// `make_cluster_name_on_cloud` sanitization; no user-hash suffix needed for
-/// a single-user local tool).
+/// Lowercase and map `_`/`.` to `-` so the name is valid as a cloud tag,
+/// label, resource name and SSH host alias (no user-hash suffix: this is a
+/// single-user local tool).
 fn sanitize_name(raw: &str) -> String {
     raw.to_lowercase().replace(['_', '.'], "-")
 }
@@ -159,12 +175,14 @@ mod tests {
         };
         let merged = spec.merged_with(CliOverrides {
             name: Some("from-cli".into()),
+            cloud: Some("primeintellect".into()),
             gpus: Some("A10G:1".into()),
             regions: vec!["us-west-2".into()],
             spot: true,
             ..Default::default()
         });
         assert_eq!(merged.name.as_deref(), Some("from-cli"));
+        assert_eq!(merged.cloud_id(), "primeintellect");
         // --gpus displaces the file's instance_type.
         assert!(merged.instance_type.is_none());
         assert_eq!(merged.gpus.as_deref(), Some("A10G:1"));
@@ -174,29 +192,59 @@ mod tests {
     }
 
     #[test]
-    fn kubernetes_flag_is_enable_only() {
-        // A file with kubernetes=true stays true even if the CLI doesn't set it.
+    fn kubernetes_is_tri_state_and_flags_win() {
+        // Unset everywhere: left to the config default.
+        assert_eq!(
+            VmSpec::default()
+                .merged_with(CliOverrides::default())
+                .kubernetes,
+            None
+        );
+        // The file's choice survives when the CLI is silent...
         let spec = VmSpec {
-            kubernetes: true,
+            kubernetes: Some(false),
             ..Default::default()
         };
-        assert!(spec.merged_with(CliOverrides::default()).kubernetes);
-        // The CLI flag can turn it on...
-        let spec = VmSpec::default().merged_with(CliOverrides {
-            kubernetes: true,
-            ..Default::default()
-        });
-        assert!(spec.kubernetes);
-        // ...but never off (mirrors --spot).
+        assert_eq!(
+            spec.merged_with(CliOverrides::default()).kubernetes,
+            Some(false)
+        );
+        // ...and either flag overrides it.
         let spec = VmSpec {
-            kubernetes: true,
+            kubernetes: Some(false),
             ..Default::default()
         }
         .merged_with(CliOverrides {
-            kubernetes: false,
+            kubernetes: Some(true),
             ..Default::default()
         });
-        assert!(spec.kubernetes);
+        assert_eq!(spec.kubernetes, Some(true));
+        let spec = VmSpec {
+            kubernetes: Some(true),
+            ..Default::default()
+        }
+        .merged_with(CliOverrides {
+            kubernetes: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(spec.kubernetes, Some(false));
+    }
+
+    #[test]
+    fn stored_specs_with_a_plain_bool_still_parse() {
+        // Rows written before the field became optional stored `true`/`false`.
+        let spec: VmSpec = serde_json::from_str(r#"{"name":"a","kubernetes":true}"#).unwrap();
+        assert_eq!(spec.kubernetes, Some(true));
+    }
+
+    #[test]
+    fn cloud_defaults_to_aws_and_is_case_insensitive() {
+        assert_eq!(VmSpec::default().cloud_id(), "aws");
+        let spec = VmSpec {
+            cloud: Some("PrimeIntellect".into()),
+            ..Default::default()
+        };
+        assert_eq!(spec.cloud_id(), "primeintellect");
     }
 
     #[test]

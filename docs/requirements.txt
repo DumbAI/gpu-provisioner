@@ -1,0 +1,5 @@
+# Docs toolchain. mkdocs is pinned to 1.x: Material does not support MkDocs 2.0.
+# Build: mkdocs build --strict
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+pymdown-extensions==12.3

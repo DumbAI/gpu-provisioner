@@ -9,10 +9,23 @@
 //! # secret_access_key = "..."
 //! # session_token = "..."      # optional
 //!
+//! [primeintellect]
+//! api_key = "..."               # else $PRIME_API_KEY, else ~/.prime/config.json
+//! # team_id = "..."             # bill pods to a team
+//! # regions = ["united_states"] # default region filter (empty = anywhere)
+//!
+//! [gcp]
+//! project = "my-project"        # else $GOOGLE_CLOUD_PROJECT / gcloud config
+//! # regions = ["us-central1"]   # default failover order
+//!
+//! [docker]                      # local test cloud (sshd containers)
+//! # image = "gpuprov/sshd:latest"
+//!
 //! [defaults]
-//! regions = ["us-west-2", "us-east-1"]   # failover order when the spec has none
+//! regions = ["us-west-2", "us-east-1"]   # AWS failover order when the spec has none
 //! disk_gb = 100
 //! ssh_user = "ubuntu"
+//! kubernetes = true             # every VM becomes a k3s node; false to opt out
 //! ```
 
 use std::path::Path;
@@ -25,7 +38,27 @@ pub struct AppConfig {
     #[serde(default)]
     pub aws: AwsConfig,
     #[serde(default)]
+    pub primeintellect: PrimeIntellectConfig,
+    #[serde(default)]
+    pub gcp: GcpConfig,
+    #[serde(default)]
+    pub docker: DockerConfig,
+    #[serde(default)]
     pub defaults: Defaults,
+}
+
+impl AppConfig {
+    /// Region preference used when the spec lists none. Region names are
+    /// cloud-specific, so each provider section may carry its own;
+    /// `defaults.regions` serves the clouds without one (AWS).
+    pub fn default_regions(&self, provider: &str) -> &[String] {
+        match provider {
+            "primeintellect" => &self.primeintellect.regions,
+            "gcp" => &self.gcp.regions,
+            "docker" => &self.docker.regions,
+            _ => &self.defaults.regions,
+        }
+    }
 }
 
 /// AWS credential selection. Resolution order:
@@ -39,16 +72,66 @@ pub struct AwsConfig {
     pub session_token: Option<String>,
 }
 
+/// Prime Intellect API access. Key resolution order: `api_key` here →
+/// `$PRIME_API_KEY` → the prime CLI's `~/.prime/config.json` (written by
+/// `prime login`) — resolved by the adapter at construction.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrimeIntellectConfig {
+    pub api_key: Option<String>,
+    pub team_id: Option<String>,
+    /// API base URL override (testing / staging).
+    pub base_url: Option<String>,
+    /// Default region filter (Prime Intellect region ids such as
+    /// `united_states`, `canada`, `eu_west`); empty = any region.
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+/// Google Cloud (Compute Engine REST). Token resolution: `access_token`
+/// here → `$GOOGLE_OAUTH_ACCESS_TOKEN` → `gcloud auth print-access-token`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcpConfig {
+    /// Project id; else `$GOOGLE_CLOUD_PROJECT`, else `gcloud config get project`.
+    pub project: Option<String>,
+    /// Static OAuth access token (short-lived; mostly for CI/testing).
+    pub access_token: Option<String>,
+    /// API base URL override (testing).
+    pub base_url: Option<String>,
+    /// Default failover regions (e.g. `us-central1`); zones are derived.
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+/// The local Docker "cloud" used for end-to-end tests: each VM is an sshd
+/// container on this machine.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DockerConfig {
+    /// Image to run; built from the embedded Dockerfile when absent locally.
+    pub image: Option<String>,
+    /// Default region label (only `local` exists).
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults {
-    /// Ordered failover candidate regions used when the spec lists none.
+    /// Ordered failover candidate regions used when the spec lists none
+    /// (for clouds without their own `regions` setting — see
+    /// `AppConfig::default_regions`).
     #[serde(default)]
     pub regions: Vec<String>,
     #[serde(default = "default_disk_gb")]
     pub disk_gb: i32,
     #[serde(default = "default_ssh_user")]
     pub ssh_user: String,
+    /// Make every VM a single-node k3s cluster unless the spec or
+    /// `--no-k8s` opts out (default: true).
+    #[serde(default = "default_kubernetes")]
+    pub kubernetes: bool,
 }
 
 impl Default for Defaults {
@@ -57,6 +140,7 @@ impl Default for Defaults {
             regions: Vec::new(),
             disk_gb: default_disk_gb(),
             ssh_user: default_ssh_user(),
+            kubernetes: default_kubernetes(),
         }
     }
 }
@@ -66,6 +150,10 @@ pub const DEFAULT_SSH_USER: &str = "ubuntu";
 
 fn default_disk_gb() -> i32 {
     100
+}
+
+fn default_kubernetes() -> bool {
+    true
 }
 
 fn default_ssh_user() -> String {
@@ -145,12 +233,31 @@ mod tests {
     }
 
     #[test]
+    fn default_regions_are_per_provider() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+            [primeintellect]
+            api_key = "pk"
+            regions = ["canada"]
+
+            [defaults]
+            regions = ["us-west-2"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.primeintellect.api_key.as_deref(), Some("pk"));
+        assert_eq!(cfg.default_regions("primeintellect"), ["canada"]);
+        assert_eq!(cfg.default_regions("aws"), ["us-west-2"]);
+    }
+
+    #[test]
     fn empty_config_uses_defaults() {
         let cfg: AppConfig = toml::from_str("").unwrap();
         assert!(cfg.aws.profile.is_none());
         assert!(cfg.defaults.regions.is_empty());
         assert_eq!(cfg.defaults.disk_gb, 100);
         assert_eq!(cfg.defaults.ssh_user, "ubuntu");
+        assert!(cfg.defaults.kubernetes, "k3s is on by default");
     }
 
     #[test]

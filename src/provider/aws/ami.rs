@@ -1,11 +1,10 @@
-//! AMI resolution — replaces SkyPilot's CSV image catalog
-//! (`skypilot:custom-gpu-ubuntu-*` tags, `sky/clouds/aws.py:_get_default_ami`)
-//! with SSM public-parameter lookups keyed on architecture × GPU, then a
-//! `DescribeImages` call for the facts SkyPilot also queries per AMI: the root
-//! device name (`get_image_root_device_name`) and the minimum root disk size.
+//! AMI resolution without a bundled image catalog: SSM public-parameter
+//! lookups keyed on architecture × GPU, then a `DescribeImages` call for the
+//! per-AMI facts a launch needs: the root device name and the minimum root
+//! disk size.
 //! Failures → `Config` error → failover to the next region.
 
-use crate::provider::ProvisionError;
+use crate::provider::ProviderError;
 
 use super::error;
 use super::instance_type::Arch;
@@ -49,10 +48,9 @@ pub struct ResolvedAmi {
 /// Resolve the default AMI for this region via SSM public parameters.
 pub async fn resolve_ami(
     ssm: &aws_sdk_ssm::Client,
-    region: &str,
     arch: Arch,
     is_gpu: bool,
-) -> Result<String, ProvisionError> {
+) -> Result<String, ProviderError> {
     let param = pick_ssm_param(arch, is_gpu);
     let resp =
         ssm.get_parameter()
@@ -60,24 +58,20 @@ pub async fn resolve_ami(
             .send()
             .await
             .map_err(|e| match error::classify(&e) {
-                error::AwsErrorClass::Credentials => ProvisionError::Credentials {
-                    msg: error::describe(&e),
-                },
-                _ => ProvisionError::Config {
-                    region: region.to_string(),
-                    msg: format!(
-                        "failed to resolve AMI via SSM parameter '{param}': {} \
+                error::AwsErrorClass::Credentials => {
+                    ProviderError::credentials(error::describe(&e))
+                }
+                _ => ProviderError::unavailable(format!(
+                    "failed to resolve AMI via SSM parameter '{param}': {} \
                          (pass --ami to use a specific image)",
-                        error::describe(&e)
-                    ),
-                },
+                    error::describe(&e)
+                )),
             })?;
     resp.parameter()
         .and_then(|p| p.value())
         .map(str::to_string)
-        .ok_or_else(|| ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!("SSM parameter '{param}' returned no value"),
+        .ok_or_else(|| {
+            ProviderError::unavailable(format!("SSM parameter '{param}' returned no value"))
         })
 }
 
@@ -86,20 +80,18 @@ pub async fn resolve_ami(
 /// region.
 pub async fn describe_ami(
     ec2: &aws_sdk_ec2::Client,
-    region: &str,
     ami_id: &str,
-) -> Result<ResolvedAmi, ProvisionError> {
+) -> Result<ResolvedAmi, ProviderError> {
     let resp = ec2
         .describe_images()
         .image_ids(ami_id)
         .send()
         .await
-        .map_err(error::in_bootstrap(region))?;
+        .map_err(error::in_bootstrap)?;
     let Some(image) = resp.images().first() else {
-        return Err(ProvisionError::Config {
-            region: region.to_string(),
-            msg: format!("AMI '{ami_id}' not found in this region"),
-        });
+        return Err(ProviderError::unavailable(format!(
+            "AMI '{ami_id}' not found in this region"
+        )));
     };
     let root_device_name = image
         .root_device_name()

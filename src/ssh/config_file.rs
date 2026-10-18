@@ -1,5 +1,4 @@
-//! User-facing SSH config integration — the mini analog of SkyPilot's
-//! `SSHConfigHelper`: one generated file per VM under our own directory, plus
+//! User-facing SSH config integration: one generated file per VM under our own directory, plus
 //! a single `Include` directive at the top of `~/.ssh/config`, so plain
 //! `ssh <vm-name>` works alongside `gpuprov ssh <vm-name>`.
 
@@ -11,7 +10,7 @@ use crate::util::set_permissions;
 const AUTOGEN_COMMENT: &str = "# Added by gpuprov";
 
 /// Render the per-VM Host block.
-pub fn host_entry(name: &str, ip: &str, user: &str, key_path: &Path) -> String {
+pub fn host_entry(name: &str, ip: &str, port: u16, user: &str, key_path: &Path) -> String {
     format!(
         "{comment} (vm: {name})
 Host {name}
@@ -22,12 +21,13 @@ Host {name}
   StrictHostKeyChecking no
   UserKnownHostsFile=/dev/null
   GlobalKnownHostsFile=/dev/null
-  Port 22
+  Port {port}
 ",
         comment = AUTOGEN_COMMENT,
         name = name,
         ip = ip,
         user = user,
+        port = port,
         key = key_path.display(),
     )
 }
@@ -37,13 +37,14 @@ pub fn write_vm_host_entry(
     ssh_dir: &Path,
     name: &str,
     ip: &str,
+    port: u16,
     user: &str,
     key_path: &Path,
 ) -> io::Result<PathBuf> {
     std::fs::create_dir_all(ssh_dir)?;
     set_permissions(ssh_dir, 0o700)?;
     let path = ssh_dir.join(name);
-    std::fs::write(&path, host_entry(name, ip, user, key_path))?;
+    std::fs::write(&path, host_entry(name, ip, port, user, key_path))?;
     set_permissions(&path, 0o644)?;
     Ok(path)
 }
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn host_entry_fields() {
-        let entry = host_entry("vm1", "1.2.3.4", "ubuntu", Path::new("/keys/id"));
+        let entry = host_entry("vm1", "1.2.3.4", 22, "ubuntu", Path::new("/keys/id"));
         for expected in [
             "Host vm1",
             "HostName 1.2.3.4",
@@ -104,8 +105,11 @@ mod tests {
     fn write_and_remove_entry() {
         let dir = tempfile::tempdir().unwrap();
         let ssh_dir = dir.path().join("ssh");
-        let path =
-            write_vm_host_entry(&ssh_dir, "vm1", "1.2.3.4", "ubuntu", Path::new("/k")).unwrap();
+        let path = write_vm_host_entry(&ssh_dir, "vm1", "1.2.3.4", 2222, "ubuntu", Path::new("/k"))
+            .unwrap();
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("Port 2222"));
         assert!(path.exists());
         remove_vm_host_entry(&ssh_dir, "vm1").unwrap();
         assert!(!path.exists());

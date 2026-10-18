@@ -1,72 +1,100 @@
-//! The Kubernetes layer: turn a provisioned VM into a single-node k3s cluster
-//! and hand the caller a working *local* kubeconfig.
+//! The Kubernetes layer's mechanics: the k3s installer and single-shot SSH
+//! primitives (boot-install probe, install, API readiness, kubeconfig
+//! fetch/rewrite, cluster health) that the durable cluster machine
+//! (`cluster::k3s`) sequences, retries and times out. No loops or sleeps here.
 //!
-//! This module owns all k8s-specific knowledge so the provisioning core below
-//! it stays orchestrator-agnostic:
+//! The installer has two delivery routes and is safe to run through both:
 //!
-//! - [`K3S_INSTALL_SCRIPT`] is the boot-time recipe. The planner embeds it into
-//!   cloud-init (via [`crate::userdata::Workload::K3s`]); it installs k3s as a
-//!   systemd service (so k3s's own control plane is the continuously-reconciling
-//!   on-VM agent) and, when the instance has an NVIDIA GPU, wires up the NVIDIA
-//!   container runtime + device plugin so pods can request `nvidia.com/gpu`.
-//! - [`setup`] runs client-side after the VM is SSH-ready: it waits for the k3s
-//!   API to answer, reads `/etc/rancher/k3s/k3s.yaml`, rewrites its server URL
-//!   from `127.0.0.1` to the VM's public IP (k3s is installed with
-//!   `--tls-san <public-ip>` so the API cert already covers it), and writes the
-//!   result to `<GPUPROV_HOME>/kube/<name>.yaml`.
+//! - **boot** — embedded in cloud-init user data on clouds that boot with
+//!   cloud-init (AWS, GCP), so k3s installs while the VM boots, overlapping
+//!   the SSH wait instead of following it;
+//! - **SSH** — pushed by the cluster machine when the boot route was not
+//!   available (no cloud-init, reused VM), failed, or timed out.
 //!
-//! There is intentionally no custom reconciler here — k3s is the reconciler.
+//! A host-wide `flock` serializes the two, a status marker
+//! (`/var/lib/gpuprov/k3s-install.status`) reports how the last run ended,
+//! and the script owns `/etc/rancher/k3s/config.yaml` (re-rendered from
+//! `/etc/gpuprov/k3s-sans`, restarting k3s only when it changes), so re-runs
+//! are idempotent and can add a TLS SAN after the fact.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 
 use crate::ssh::options::SshOptions;
 use crate::ssh::runner;
 use crate::util::{self, Paths};
 
-/// Bash run once at boot (via cloud-init `write_files` + `runcmd`) to install a
-/// single-node k3s cluster. Idempotent; k3s's own installer is safe to re-run.
+/// Ports a k3s node serves to clients: the Kubernetes API server plus the
+/// k3s-bundled Traefik ingress / ServiceLB HTTP(S) endpoints.
+pub const K3S_PORTS: [u16; 3] = [6443, 80, 443];
+/// API server port on the node.
+pub const API_PORT: u16 = 6443;
+/// Local end of `gpuprov tunnel` for clouds without inbound ports.
+pub const TUNNEL_LOCAL_PORT: u16 = 16443;
+/// Where cloud-init writes the installer for the boot route.
+pub const BOOT_SCRIPT_PATH: &str = "/opt/gpuprov/install-k3s.sh";
+
+/// Run as root. Environment:
+/// - `GPUPROV_INSTALL_ORIGIN` — `boot` or `ssh` (recorded in the marker);
+/// - `GPUPROV_TLS_SAN` — host clients use for the API; when empty (boot
+///   route) the public IP is looked up from the AWS / GCP metadata services.
 ///
-/// GPU is detected at boot (not at plan time) via `nvidia-smi`, so the same
-/// script serves CPU and GPU instances. On the AWS Deep Learning AMI the NVIDIA
-/// driver is already present, so only `nvidia-container-toolkit` is installed.
-///
-/// The NVIDIA device-plugin manifest is pinned to a specific release
-/// (`v0.19.3`); bump the URL below to upgrade it.
+/// GPU is detected via `nvidia-smi`, so one script serves CPU and GPU nodes.
+/// Images that ship the NVIDIA driver and toolkit (AWS Deep Learning AMI,
+/// GCP Deep Learning VM, CUDA marketplace images) need nothing extra. The
+/// device-plugin manifest is pinned (`v0.19.3`).
 pub const K3S_INSTALL_SCRIPT: &str = r#"#!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 
-log() { echo "[gpuprov-k3s] $*"; }
+ORIGIN="${GPUPROV_INSTALL_ORIGIN:-ssh}"
+STATUS_DIR=/var/lib/gpuprov
+STATUS="$STATUS_DIR/k3s-install.status"
+SANS=/etc/gpuprov/k3s-sans
+GPU_FLAG=/etc/gpuprov/k3s-gpu
+CONF=/etc/rancher/k3s/config.yaml
+mkdir -p "$STATUS_DIR" /etc/gpuprov /etc/rancher/k3s
 
-# --- Public IP for the API-server TLS SAN (IMDSv2, with retries) -----------
-PUBIP=""
-for _ in 1 2 3 4 5; do
-  TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+log() { echo "[gpuprov-k3s:$ORIGIN] $*"; }
+
+# One installer at a time: the boot run and an SSH fallback must never race.
+exec 9>/run/gpuprov-k3s.lock
+flock 9
+
+GPU=0
+echo "state=running origin=$ORIGIN gpu=$GPU" > "$STATUS"
+trap 'rc=$?; if [ $rc -ne 0 ]; then echo "state=failed origin=$ORIGIN gpu=$GPU exit=$rc" > "$STATUS"; fi' EXIT
+set -x
+
+# --- TLS SAN: the caller's host, else the public IP from cloud metadata ----
+SAN="${GPUPROV_TLS_SAN:-}"
+if [ -z "$SAN" ]; then
+  TOKEN=$(curl -sS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
     -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
   if [ -n "$TOKEN" ]; then
-    PUBIP=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
+    SAN=$(curl -sS -m 2 -H "X-aws-ec2-metadata-token: $TOKEN" \
       "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
   fi
-  [ -n "$PUBIP" ] && break
-  sleep 3
-done
-log "public IP: ${PUBIP:-<none>}"
+fi
+if [ -z "$SAN" ]; then
+  SAN=$(curl -sS -m 2 -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" \
+    2>/dev/null || true)
+fi
+case "$SAN" in *[!A-Za-z0-9.:-]*) SAN="";; esac   # ignore error pages
+if [ -n "$SAN" ] && ! grep -qxF "$SAN" "$SANS" 2>/dev/null; then echo "$SAN" >> "$SANS"; fi
+touch "$SANS"
 
-INSTALL_ARGS="--write-kubeconfig-mode 644"
-[ -n "$PUBIP" ] && INSTALL_ARGS="$INSTALL_ARGS --tls-san $PUBIP"
-
-# --- GPU: install nvidia-container-toolkit BEFORE k3s so k3s auto-detects it -
-GPU=0
+# --- GPU: install nvidia-container-toolkit BEFORE k3s so k3s detects it -----
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   GPU=1
-  if command -v nvidia-ctk >/dev/null 2>&1; then
-    log "nvidia-container-toolkit already present (Deep Learning AMI)"
-  else
+  if ! command -v nvidia-ctk >/dev/null 2>&1; then
     log "NVIDIA GPU detected; installing nvidia-container-toolkit"
     export DEBIAN_FRONTEND=noninteractive
-    # Save the key armored (.asc) and let apt verify against it via signed-by.
-    # (Avoids `gpg --dearmor`, which fails on /dev/tty in cloud-init's no-TTY
-    #  context and would abort the whole script under `set -e`.)
+    # Armored key + signed-by (no `gpg --dearmor`, which needs a TTY).
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
       -o /usr/share/keyrings/nvidia-container-toolkit-keyring.asc
     curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
@@ -75,59 +103,89 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     apt-get update
     apt-get install -y nvidia-container-toolkit
   fi
-  # Make nvidia the default containerd runtime so the device plugin and GPU
-  # pods work without an explicit runtimeClassName.
-  INSTALL_ARGS="$INSTALL_ARGS --default-runtime nvidia"
+fi
+echo "$GPU" > "$GPU_FLAG"
+
+# --- Render the k3s config we own; note whether it changed ------------------
+{
+  echo 'write-kubeconfig-mode: "0644"'
+  # nvidia as the default containerd runtime: GPU pods need no runtimeClassName.
+  [ "$GPU" = "1" ] && echo 'default-runtime: nvidia'
+  if [ -s "$SANS" ]; then
+    echo 'tls-san:'
+    while IFS= read -r s; do [ -n "$s" ] && echo "  - \"$s\""; done < "$SANS"
+  fi
+} > "$CONF.new"
+CHANGED=1
+if cmp -s "$CONF.new" "$CONF"; then CHANGED=0; rm -f "$CONF.new"; else mv "$CONF.new" "$CONF"; fi
+
+# --- Install k3s, or apply config changes to a running one -----------------
+if systemctl is-active --quiet k3s 2>/dev/null; then
+  if [ "$CHANGED" = "1" ]; then
+    log "k3s running; config changed (TLS SAN / runtime) — restarting"
+    systemctl restart k3s
+  else
+    log "k3s running; nothing to change"
+  fi
+else
+  log "installing k3s"
+  curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server" sh -
 fi
 
-# --- Install k3s (systemd-managed; restarts on reboot) ---------------------
-log "installing k3s: server $INSTALL_ARGS"
-curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server $INSTALL_ARGS" sh -
-
-# --- Wait for the API server, then (GPU) apply the device plugin -----------
-for _ in $(seq 1 120); do
-  k3s kubectl get nodes >/dev/null 2>&1 && break
-  sleep 5
-done
-
+# --- GPU: device plugin (needs the API) ------------------------------------
 if [ "$GPU" = "1" ]; then
+  for _ in $(seq 1 60); do
+    /usr/local/bin/k3s kubectl get --raw=/readyz >/dev/null 2>&1 && break
+    sleep 5
+  done
   log "applying NVIDIA device plugin"
-  k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.19.3/deployments/static/nvidia-device-plugin.yml
+  /usr/local/bin/k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.19.3/deployments/static/nvidia-device-plugin.yml
 fi
 
+echo "state=done origin=$ORIGIN gpu=$GPU" > "$STATUS"
 log "k3s install complete"
 "#;
 
-/// Where things ended up after [`setup`].
-#[derive(Debug, Clone)]
-pub struct KubeSetup {
-    /// Local kubeconfig file (`export KUBECONFIG=<this>`).
-    pub kubeconfig_path: PathBuf,
-    /// The API endpoint the kubeconfig points at (`https://<ip>:6443`).
-    pub api_endpoint: String,
-    /// The renamed cluster/user/context name (`gpuprov-<name>`).
-    pub context: String,
-}
+/// Reports what a boot-route install did, in ONE SSH round trip (parsed by
+/// [`BootProbe::parse`]).
+const BOOT_PROBE_SCRIPT: &str = r#"echo "marker=$(cat /var/lib/gpuprov/k3s-install.status 2>/dev/null | tr ' ' ',')"
+if command -v cloud-init >/dev/null 2>&1; then
+  echo "cloud_init=$(cloud-init status 2>/dev/null | sed -n 's/^status: *//p' | head -1)"
+else
+  echo "cloud_init=absent"
+fi
+echo "k3s_active=$(systemctl is-active k3s 2>/dev/null)"
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then echo "gpu_present=1"; else echo "gpu_present=0"; fi
+"#;
+
+/// Prints `key=value` lines describing cluster health in ONE SSH round trip.
+/// Absolute k3s path: non-interactive SSH shells (and sudo's secure_path on
+/// some images) lack /usr/local/bin. `GPUPROV_TLS_SAN`, when set, is checked
+/// against the API server's serving certificate.
+const VALIDATE_SCRIPT: &str = r#"K=/usr/local/bin/k3s
+echo "node_ready=$($K kubectl get nodes -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)"
+echo "coredns_ready=$($K kubectl -n kube-system get deploy coredns -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then echo "gpu_present=1"; else echo "gpu_present=0"; fi
+echo "gpu_allocatable=$($K kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}' 2>/dev/null)"
+if [ -n "${GPUPROV_TLS_SAN:-}" ]; then
+  CERT=/var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt
+  if command -v openssl >/dev/null 2>&1 && [ -f "$CERT" ]; then
+    if openssl x509 -in "$CERT" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed 's/^ *//' \
+      | grep -qxF -e "IP Address:$GPUPROV_TLS_SAN" -e "DNS:$GPUPROV_TLS_SAN"; then
+      echo "san_ok=1"
+    else
+      echo "san_ok=0"
+    fi
+  fi
+fi
+"#;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KubeError {
-    #[error(
-        "VM '{0}' does not have k3s installed (was it provisioned without --k8s?); \
-         run `gpuprov down {0}` and re-provision with --k8s"
-    )]
-    NotK3sNode(String),
-    #[error(
-        "k3s did not become ready on {ip} within {secs}s (last probe: {last}); inspect the \
-         boot log: `gpuprov ssh {name} -- sudo cat /var/log/cloud-init-output.log`"
-    )]
-    NotReady {
-        name: String,
-        ip: String,
-        secs: u64,
-        last: String,
-    },
     #[error("SSH to the VM failed: {0}")]
     Ssh(String),
+    #[error("k3s install failed (exit {code}): {stderr}")]
+    Install { code: i32, stderr: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("could not parse the k3s kubeconfig: {0}")]
@@ -136,142 +194,309 @@ pub enum KubeError {
     Invalid(String),
 }
 
-/// Default readiness budget — generous, since first boot installs k3s (and, on
-/// GPU nodes, the toolkit + device plugin) before the API answers.
-pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Bring the local kubeconfig into being: (optionally) confirm k3s is installed,
-/// wait for the API, fetch `/etc/rancher/k3s/k3s.yaml`, rewrite it for the
-/// public IP, and write `<base>/kube/<name>.yaml` (0600).
-///
-/// `reused` means the instance already existed, so cloud-init will *not* run
-/// again — if k3s is absent we fail fast rather than wait for an install that
-/// will never happen.
-pub async fn setup(
-    name: &str,
-    public_ip: &str,
-    ssh_user: &str,
-    key_path: &Path,
-    paths: &Paths,
-    timeout: Duration,
-    reused: bool,
-) -> Result<KubeSetup, KubeError> {
-    let opts = SshOptions::new(key_path.to_path_buf())
-        .batch_mode(true)
-        .control_dir(Some(paths.sockets_dir()));
-
-    if reused && !k3s_installed(ssh_user, public_ip, &opts).await? {
-        return Err(KubeError::NotK3sNode(name.to_string()));
-    }
-
-    wait_for_k3s(name, public_ip, ssh_user, &opts, timeout).await?;
-
-    let raw = fetch_kubeconfig(ssh_user, public_ip, &opts).await?;
-    let rewritten = rewrite_kubeconfig(&raw, public_ip, name)?;
-
-    let path = paths.kube_dir().join(format!("{name}.yaml"));
-    std::fs::write(&path, rewritten.as_bytes())?;
-    util::set_permissions(&path, 0o600)?;
-
-    Ok(KubeSetup {
-        kubeconfig_path: path,
-        api_endpoint: format!("https://{public_ip}:6443"),
-        context: format!("gpuprov-{name}"),
-    })
+/// How clients reach the API server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccessMode {
+    /// `https://<public-host>:6443` — the cloud opened the port.
+    Direct,
+    /// `https://127.0.0.1:16443` through `gpuprov tunnel <name>` — for clouds
+    /// without inbound-port control (e.g. Prime Intellect, the Docker cloud).
+    SshTunnel,
 }
 
-/// Delete `<base>/kube/<name>.yaml` if present (idempotent). Called by `down`.
-pub fn remove_kubeconfig(paths: &Paths, name: &str) -> std::io::Result<()> {
-    let path = paths.kube_dir().join(format!("{name}.yaml"));
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+/// Where the local kubeconfig lives and what it points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeAccess {
+    pub kubeconfig_path: PathBuf,
+    pub api_endpoint: String,
+    /// The renamed cluster/user/context name (`gpuprov-<name>`).
+    pub context: String,
+    pub mode: AccessMode,
+}
+
+/// SSH coordinates of the node.
+#[derive(Debug, Clone)]
+pub struct Node<'a> {
+    pub host: &'a str,
+    pub user: &'a str,
+    pub opts: SshOptions,
+}
+
+/// One validation snapshot (see [`VALIDATE_SCRIPT`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Health {
+    pub node_ready: bool,
+    pub coredns_ready: bool,
+    pub gpu_present: bool,
+    pub gpu_allocatable: u32,
+    /// Whether the API serving cert covers the requested SAN; `None` when not
+    /// checked (no SAN asked for, or no `openssl` on the node).
+    pub san_ok: Option<bool>,
+}
+
+impl Health {
+    /// What is still missing, or empty when the cluster is usable.
+    pub fn missing(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.node_ready {
+            missing.push("node not Ready");
+        }
+        if !self.coredns_ready {
+            missing.push("CoreDNS not ready");
+        }
+        if self.gpu_present && self.gpu_allocatable == 0 {
+            missing.push("GPU present but nvidia.com/gpu not allocatable yet");
+        }
+        if self.san_ok == Some(false) {
+            missing.push("API certificate does not cover the public host yet");
+        }
+        missing
+    }
+
+    /// Parse the `key=value` output of [`VALIDATE_SCRIPT`]. Pure.
+    pub fn parse(output: &str) -> Health {
+        let mut health = Health::default();
+        for line in output.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "node_ready" => health.node_ready = value == "True",
+                "coredns_ready" => health.coredns_ready = value.parse::<u32>().unwrap_or(0) > 0,
+                "gpu_present" => health.gpu_present = value == "1",
+                "gpu_allocatable" => health.gpu_allocatable = value.parse().unwrap_or(0),
+                "san_ok" => health.san_ok = Some(value == "1"),
+                _ => {}
+            }
+        }
+        health
+    }
+}
+
+/// What a boot-route install left behind (see [`BOOT_PROBE_SCRIPT`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BootProbe {
+    /// `state` from the status marker: `running` / `done` / `failed`; `None`
+    /// when no installer ever ran on this host.
+    pub marker_state: Option<String>,
+    /// Whether the marker's run detected a GPU.
+    pub marker_gpu: bool,
+    /// `cloud-init status` (`running`, `done`, `error`, …) or `absent`.
+    pub cloud_init: String,
+    pub k3s_active: bool,
+    pub gpu_present: bool,
+}
+
+/// What the cluster machine should do after probing the boot route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootDecision {
+    /// Installed at boot and healthy: skip the SSH install.
+    Installed,
+    /// Boot install (or cloud-init before it) still running.
+    Wait(String),
+    /// Take the SSH route, with the reason (for the journal).
+    Fallback(String),
+}
+
+impl BootProbe {
+    /// Parse [`BOOT_PROBE_SCRIPT`] output. Pure.
+    pub fn parse(output: &str) -> BootProbe {
+        let mut probe = BootProbe::default();
+        for line in output.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "marker" => {
+                    for field in value.split(',') {
+                        match field.split_once('=') {
+                            Some(("state", state)) if !state.is_empty() => {
+                                probe.marker_state = Some(state.to_string())
+                            }
+                            Some(("gpu", gpu)) => probe.marker_gpu = gpu == "1",
+                            _ => {}
+                        }
+                    }
+                }
+                "cloud_init" => {
+                    probe.cloud_init = if value.is_empty() {
+                        "absent".into()
+                    } else {
+                        value.to_string()
+                    }
+                }
+                "k3s_active" => probe.k3s_active = value == "active",
+                "gpu_present" => probe.gpu_present = value == "1",
+                _ => {}
+            }
+        }
+        probe
+    }
+
+    /// The boot-route decision table. Pure.
+    pub fn decide(&self) -> BootDecision {
+        match self.marker_state.as_deref() {
+            Some("done") if !self.k3s_active => {
+                BootDecision::Fallback("installed at boot but k3s is not running".into())
+            }
+            Some("done") if self.gpu_present && !self.marker_gpu => BootDecision::Fallback(
+                "GPU appeared after the boot install; GPU runtime not configured".into(),
+            ),
+            Some("done") => BootDecision::Installed,
+            Some("running") => BootDecision::Wait("boot install in progress".into()),
+            Some(other) => BootDecision::Fallback(format!("boot install ended in state '{other}'")),
+            None if self.cloud_init == "running" => {
+                BootDecision::Wait("cloud-init still running; boot install not started".into())
+            }
+            None => BootDecision::Fallback(format!(
+                "k3s was not installed at boot (cloud-init: {})",
+                self.cloud_init
+            )),
+        }
     }
 }
 
 /// A single remote shell command (ssh runs it via the login shell).
-fn sh(command: &str) -> Vec<String> {
-    vec![command.to_string()]
+fn sh(command: impl Into<String>) -> Vec<String> {
+    vec![command.into()]
 }
 
-async fn k3s_installed(user: &str, ip: &str, opts: &SshOptions) -> Result<bool, KubeError> {
-    // Absolute path: a non-interactive SSH shell does not have /usr/local/bin
-    // (where the k3s installer puts the binary) on PATH.
-    let out = runner::run_command_capture(user, ip, opts, &sh("test -x /usr/local/bin/k3s"))
+async fn capture(node: &Node<'_>, command: String) -> Result<std::process::Output, KubeError> {
+    runner::run_command_capture(node.user, node.host, &node.opts, &sh(command))
         .await
-        .map_err(|e| KubeError::Ssh(e.to_string()))?;
+        .map_err(|e| KubeError::Ssh(e.to_string()))
+}
+
+/// Inspect what the boot route did (one SSH round trip).
+pub async fn probe_boot(node: &Node<'_>) -> Result<BootProbe, KubeError> {
+    let command = format!("bash -c {}", shell_quote(BOOT_PROBE_SCRIPT));
+    let out = capture(node, command).await?;
+    Ok(BootProbe::parse(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The SSH route: push and run the installer (idempotent; waits for a boot
+/// run holding the lock). `tls_san` is the host clients will use for the API
+/// and is added to the API certificate.
+pub async fn install(node: &Node<'_>, tls_san: &str) -> Result<(), KubeError> {
+    let script = BASE64.encode(K3S_INSTALL_SCRIPT);
+    let command = format!(
+        "echo {script} | base64 -d | sudo GPUPROV_INSTALL_ORIGIN=ssh GPUPROV_TLS_SAN={san} bash -s",
+        san = shell_quote(tls_san)
+    );
+    let out = capture(node, command).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Keep the tail: the actionable error is at the end of `set -x` output.
+    let tail: Vec<&str> = stderr.lines().rev().take(15).collect();
+    Err(KubeError::Install {
+        code: out.status.code().unwrap_or(-1),
+        stderr: tail.into_iter().rev().collect::<Vec<_>>().join("\n"),
+    })
+}
+
+/// Whether the API server answers `/readyz`. `Err` only for SSH failures.
+pub async fn api_ready(node: &Node<'_>) -> Result<bool, KubeError> {
+    let out = capture(
+        node,
+        "sudo /usr/local/bin/k3s kubectl get --raw=/readyz".to_string(),
+    )
+    .await?;
     Ok(out.status.success())
 }
 
-async fn wait_for_k3s(
+/// Read `/etc/rancher/k3s/k3s.yaml`, rewrite it for `server_host`, and write
+/// `<base>/kube/<name>.yaml` (0600).
+pub async fn fetch_kubeconfig(
+    node: &Node<'_>,
+    paths: &Paths,
     name: &str,
-    ip: &str,
-    user: &str,
-    opts: &SshOptions,
-    timeout: Duration,
-) -> Result<(), KubeError> {
-    let start = Instant::now();
-    // Absolute path to k3s: a non-interactive SSH shell (and sudo's secure_path
-    // on some AMIs) does not include /usr/local/bin, so a bare `k3s` is not found.
-    let probe = sh("sudo /usr/local/bin/k3s kubectl get nodes");
-    let mut attempts: u32 = 0;
-    loop {
-        // Capture why the probe isn't ready so a timeout is diagnosable, not silent.
-        let last = match runner::run_command_capture(user, ip, opts, &probe).await {
-            Ok(out) if out.status.success() => return Ok(()),
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let msg = stderr.trim();
-                if msg.is_empty() {
-                    format!("exit {}", out.status.code().unwrap_or(-1))
-                } else {
-                    msg.to_string()
-                }
-            }
-            // A transient ssh hiccup mid-boot is expected; keep polling.
-            Err(e) => {
-                tracing::debug!("k3s readiness probe ssh error on {ip}: {e}");
-                format!("ssh error: {e}")
-            }
-        };
-        if start.elapsed() >= timeout {
-            return Err(KubeError::NotReady {
-                name: name.to_string(),
-                ip: ip.to_string(),
-                secs: timeout.as_secs(),
-                last,
-            });
-        }
-        attempts += 1;
-        if attempts.is_multiple_of(6) {
-            tracing::info!(
-                "still waiting for k3s API on {ip} ({}s elapsed): {last}",
-                start.elapsed().as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-}
-
-async fn fetch_kubeconfig(user: &str, ip: &str, opts: &SshOptions) -> Result<String, KubeError> {
-    let out =
-        runner::run_command_capture(user, ip, opts, &sh("sudo cat /etc/rancher/k3s/k3s.yaml"))
-            .await
-            .map_err(|e| KubeError::Ssh(e.to_string()))?;
+    mode: AccessMode,
+) -> Result<KubeAccess, KubeError> {
+    let out = capture(node, "sudo cat /etc/rancher/k3s/k3s.yaml".to_string()).await?;
     if !out.status.success() {
         return Err(KubeError::Ssh(format!(
             "reading /etc/rancher/k3s/k3s.yaml failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let (server_host, port) = match mode {
+        AccessMode::Direct => (node.host, API_PORT),
+        AccessMode::SshTunnel => ("127.0.0.1", TUNNEL_LOCAL_PORT),
+    };
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut rewritten = rewrite_kubeconfig(&raw, server_host, name)?;
+    if port != API_PORT {
+        rewritten = rewritten.replace(
+            &format!("{server_host}:{API_PORT}"),
+            &format!("{server_host}:{port}"),
+        );
+    }
+    let path = kubeconfig_path(paths, name);
+    std::fs::write(&path, rewritten.as_bytes())?;
+    util::set_permissions(&path, 0o600)?;
+    Ok(KubeAccess {
+        kubeconfig_path: path,
+        api_endpoint: format!("https://{server_host}:{port}"),
+        context: format!("gpuprov-{name}"),
+        mode,
+    })
 }
 
-/// Rewrite a k3s kubeconfig for remote use: repoint the server at `public_ip`
+/// One health snapshot of the cluster, taken on the node. With `tls_san`,
+/// also checks that the API certificate covers that host.
+pub async fn health(node: &Node<'_>, tls_san: Option<&str>) -> Result<Health, KubeError> {
+    let command = format!(
+        "sudo GPUPROV_TLS_SAN={} bash -c {}",
+        shell_quote(tls_san.unwrap_or("")),
+        shell_quote(VALIDATE_SCRIPT)
+    );
+    let out = capture(node, command).await?;
+    Ok(Health::parse(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Whether `host:port` accepts TCP from here — catches a closed firewall
+/// that on-node checks cannot see.
+pub async fn reachable(host: &str, port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect((host, port))
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+pub fn kubeconfig_path(paths: &Paths, name: &str) -> PathBuf {
+    paths.kube_dir().join(format!("{name}.yaml"))
+}
+
+/// Delete `<base>/kube/<name>.yaml` if present (idempotent). Called by `down`.
+pub fn remove_kubeconfig(paths: &Paths, name: &str) -> std::io::Result<()> {
+    remove_if_exists(&kubeconfig_path(paths, name))
+}
+
+fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Single-quote for a POSIX shell.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Rewrite a k3s kubeconfig for remote use: repoint the server at `server_host`
 /// and rename the cluster/user/context to `gpuprov-<name>` (so multiple
 /// clusters can coexist in a merged kubeconfig). Pure — unit-tested.
-fn rewrite_kubeconfig(raw: &str, public_ip: &str, name: &str) -> Result<String, KubeError> {
+pub fn rewrite_kubeconfig(raw: &str, server_host: &str, name: &str) -> Result<String, KubeError> {
     let ctx = format!("gpuprov-{name}");
     let ctx_val = serde_yaml::Value::from(ctx.as_str());
     let mut doc: serde_yaml::Value = serde_yaml::from_str(raw).map_err(KubeError::Parse)?;
@@ -298,7 +523,7 @@ fn rewrite_kubeconfig(raw: &str, public_ip: &str, name: &str) -> Result<String, 
                 .and_then(serde_yaml::Value::as_str)
                 .map(str::to_string);
             if let Some(server) = server {
-                inner.insert("server".into(), with_host(&server, public_ip).into());
+                inner.insert("server".into(), with_host(&server, server_host).into());
             }
         }
     }
@@ -435,19 +660,130 @@ users:
     }
 
     #[test]
+    fn health_parses_and_reports_missing_pieces() {
+        let ok =
+            Health::parse("node_ready=True\ncoredns_ready=1\ngpu_present=0\ngpu_allocatable=\n");
+        assert!(ok.missing().is_empty(), "{ok:?}");
+
+        let gpu_pending =
+            Health::parse("node_ready=True\ncoredns_ready=1\ngpu_present=1\ngpu_allocatable=\n");
+        assert_eq!(
+            gpu_pending.missing(),
+            vec!["GPU present but nvidia.com/gpu not allocatable yet"]
+        );
+
+        let booting = Health::parse("node_ready=\ncoredns_ready=\n");
+        assert_eq!(
+            booting.missing(),
+            vec!["node not Ready", "CoreDNS not ready"]
+        );
+
+        let gpu_ok =
+            Health::parse("node_ready=True\ncoredns_ready=2\ngpu_present=1\ngpu_allocatable=8\n");
+        assert_eq!(gpu_ok.gpu_allocatable, 8);
+        assert!(gpu_ok.missing().is_empty());
+    }
+
+    #[test]
+    fn shell_quote_survives_single_quotes() {
+        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[test]
     fn install_script_is_well_formed() {
-        // The GPU URL must be assembled with the pinned version and no stray gaps.
-        assert!(K3S_INSTALL_SCRIPT.starts_with("#!/usr/bin/env bash"));
-        assert!(K3S_INSTALL_SCRIPT.contains("INSTALL_K3S_EXEC=\"server $INSTALL_ARGS\""));
-        assert!(K3S_INSTALL_SCRIPT.contains("--tls-san $PUBIP"));
-        assert!(K3S_INSTALL_SCRIPT
+        let script = K3S_INSTALL_SCRIPT;
+        assert!(script.starts_with("#!/usr/bin/env bash"));
+        // Boot and SSH runs are serialized and report through the marker.
+        assert!(script.contains("flock 9"));
+        assert!(script.contains("state=running origin=$ORIGIN"));
+        assert!(script.contains("state=failed origin=$ORIGIN"));
+        assert!(script.trim_end().ends_with(r#"log "k3s install complete""#));
+        // The config we own carries the SANs; a changed config restarts k3s.
+        assert!(script.contains("tls-san:"));
+        assert!(script.contains("systemctl restart k3s"));
+        assert!(script.contains("systemctl is-active --quiet k3s"));
+        // Public-IP fallback for the boot route (AWS IMDSv2, GCP metadata).
+        assert!(script.contains("169.254.169.254/latest/api/token"));
+        assert!(script.contains("Metadata-Flavor: Google"));
+        assert!(script
             .contains("k8s-device-plugin/v0.19.3/deployments/static/nvidia-device-plugin.yml"));
-        // The armored keyring is downloaded directly; piping the key through
-        // gpg fails on /dev/tty under cloud-init, so it must not be used.
-        assert!(!K3S_INSTALL_SCRIPT.contains("| gpg"));
-        assert!(K3S_INSTALL_SCRIPT.contains("nvidia-container-toolkit-keyring.asc"));
-        assert!(K3S_INSTALL_SCRIPT
-            .trim_end()
-            .ends_with(r#"log "k3s install complete""#));
+        // Piping the NVIDIA key through gpg fails without a TTY.
+        assert!(!script.contains("| gpg"));
+    }
+
+    /// `bash -n` every embedded script: a syntax error must fail the test
+    /// suite, not a VM's boot.
+    #[test]
+    fn embedded_scripts_parse_as_bash() {
+        for (name, script) in [
+            ("install", K3S_INSTALL_SCRIPT),
+            ("boot-probe", BOOT_PROBE_SCRIPT),
+            ("validate", VALIDATE_SCRIPT),
+        ] {
+            let out = std::process::Command::new("bash")
+                .args(["-n", "-c", script])
+                .output()
+                .expect("bash available");
+            assert!(
+                out.status.success(),
+                "{name} script: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    fn probe(text: &str) -> BootProbe {
+        BootProbe::parse(text)
+    }
+
+    #[test]
+    fn boot_probe_parses_marker_and_status() {
+        let p = probe(
+            "marker=state=done,origin=boot,gpu=1\ncloud_init=done\nk3s_active=active\ngpu_present=1\n",
+        );
+        assert_eq!(p.marker_state.as_deref(), Some("done"));
+        assert!(p.marker_gpu && p.k3s_active && p.gpu_present);
+        assert_eq!(p.cloud_init, "done");
+        let empty = probe("marker=\ncloud_init=\nk3s_active=inactive\ngpu_present=0\n");
+        assert_eq!(empty.marker_state, None);
+        assert_eq!(empty.cloud_init, "absent");
+    }
+
+    #[test]
+    fn boot_decision_table() {
+        let installed = probe("marker=state=done,gpu=0\nk3s_active=active\ngpu_present=0\n");
+        assert_eq!(installed.decide(), BootDecision::Installed);
+
+        let running = probe("marker=state=running\ncloud_init=running\n");
+        assert!(matches!(running.decide(), BootDecision::Wait(_)));
+
+        // cloud-init has not reached our runcmd yet.
+        let pre = probe("marker=\ncloud_init=running\n");
+        assert!(matches!(pre.decide(), BootDecision::Wait(_)));
+
+        for fallback in [
+            "marker=state=failed,exit=1\ncloud_init=error\n", // boot run failed
+            "marker=\ncloud_init=done\n",                     // never delivered
+            "marker=\ncloud_init=absent\n",                   // cloud without cloud-init
+            "marker=state=done,gpu=0\nk3s_active=failed\n",   // installed but dead
+            "marker=state=done,gpu=0\nk3s_active=active\ngpu_present=1\n", // GPU missed at boot
+        ] {
+            assert!(
+                matches!(probe(fallback).decide(), BootDecision::Fallback(_)),
+                "{fallback}"
+            );
+        }
+    }
+
+    #[test]
+    fn health_reports_missing_san() {
+        let h = Health::parse("node_ready=True\ncoredns_ready=1\ngpu_present=0\nsan_ok=0\n");
+        assert_eq!(
+            h.missing(),
+            vec!["API certificate does not cover the public host yet"]
+        );
+        let unchecked = Health::parse("node_ready=True\ncoredns_ready=1\n");
+        assert_eq!(unchecked.san_ok, None);
+        assert!(unchecked.missing().is_empty());
     }
 }

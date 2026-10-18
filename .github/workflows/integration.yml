@@ -1,0 +1,36 @@
+name: Integration tests
+
+# End-to-end runs of the real launch/teardown state machines against the
+# Docker test cloud: each "VM" is an sshd container reached over real SSH.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A missing Docker daemon must fail the job, not silently skip the tests.
+  GPUPROV_E2E_REQUIRE_DOCKER: "1"
+
+jobs:
+  docker-e2e:
+    name: docker e2e
+    # GitHub's Linux runners ship Docker and the OpenSSH client.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Docker info
+        run: docker info --format '{{.ServerVersion}} {{.OperatingSystem}}'
+      - name: Run e2e tests
+        run: cargo test --locked --test docker_e2e -- --ignored --nocapture
+      - name: Leftover containers (debug)
+        if: always()
+        run: docker ps -a --filter label=gpuprov-managed=true

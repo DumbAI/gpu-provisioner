@@ -1,5 +1,4 @@
-//! Sane SSH options — a direct port of SkyPilot's `ssh_options_list`
-//! (`sky/utils/command_runner.py`): no host-key prompts, no known_hosts
+//! Sane SSH options: no host-key prompts, no known_hosts
 //! pollution (IPs get recycled across VMs), fast dead-connection detection,
 //! and ControlMaster multiplexing for repeated commands.
 
@@ -31,6 +30,11 @@ impl SshOptions {
             batch_mode: false,
             control_dir: None,
         }
+    }
+
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
     }
 
     pub fn batch_mode(mut self, on: bool) -> Self {

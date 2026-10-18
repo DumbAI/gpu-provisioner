@@ -1,5 +1,6 @@
 //! AWS adapter: credential resolution (CLI config file → profile → default
-//! chain), per-region client cache, and the `CloudProvider` implementation.
+//! chain), per-region client cache, and the `CloudProvider` implementation
+//! (prepare = `bootstrap`, create/observe/delete/cleanup = `instance`).
 
 pub mod ami;
 pub mod bootstrap;
@@ -17,12 +18,15 @@ use aws_sdk_ec2::types::Filter;
 
 use crate::config::AwsConfig;
 use crate::provider::{
-    Candidate, CloudProvider, ProvisionError, ProvisionRecord, ProvisionRequest, ResourceRequest,
-    VmInfo,
+    Capabilities, CloudProvider, InstanceSpec, Location, Observed, Offer, ProviderError,
+    ResourceRequest,
 };
 
 /// A single-valued EC2 describe filter — the AWS SDK's builder chain is
 /// verbose enough to be worth wrapping (used across bootstrap/instance queries).
+/// Canonical provider id recorded on VM rows.
+pub const PROVIDER_ID: &str = "aws";
+
 pub(crate) fn filter(name: &str, value: &str) -> Filter {
     Filter::builder().name(name).values(value).build()
 }
@@ -43,8 +47,8 @@ pub struct AwsProvider {
 #[derive(Clone)]
 struct RegionClients {
     ec2: aws_sdk_ec2::Client,
-    /// SDK retries disabled so capacity errors surface immediately
-    /// (SkyPilot's fail-fast `max_attempts=0` client for create/start).
+    /// SDK retries disabled so capacity errors surface immediately on
+    /// `RunInstances` (the core decides whether to retry or fail over).
     ec2_fail_fast: aws_sdk_ec2::Client,
     ssm: aws_sdk_ssm::Client,
 }
@@ -105,38 +109,65 @@ impl AwsProvider {
 #[async_trait]
 impl CloudProvider for AwsProvider {
     fn name(&self) -> &'static str {
-        "aws"
+        PROVIDER_ID
     }
 
-    async fn plan_candidates(
+    fn capabilities(&self) -> Capabilities {
+        // Everything is supported, and the Ubuntu / Deep Learning AMIs run
+        // cloud-init. EC2 boots in ~1 min; the default 10-minute boot budget
+        // matches the boto3 `instance_running` waiter.
+        Capabilities {
+            cloud_init: true,
+            ..Capabilities::default()
+        }
+    }
+
+    async fn plan(&self, request: &ResourceRequest) -> Result<Vec<Offer>, ProviderError> {
+        catalog::plan(request)
+    }
+
+    async fn prepare(
         &self,
-        request: &ResourceRequest,
-    ) -> Result<Vec<Candidate>, ProvisionError> {
-        // Static catalog today; may consult pricing/offering APIs later
-        // (hence async on the trait).
-        catalog::plan_candidates(request)
+        offer: &Offer,
+        spec: &InstanceSpec,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let clients = self.clients(&offer.region);
+        let prepared = bootstrap::bootstrap(&clients.ec2, &clients.ssm, offer, spec).await?;
+        serde_json::to_value(prepared)
+            .map_err(|e| ProviderError::failed(format!("serializing bootstrap state: {e}")))
     }
 
-    async fn provision(&self, req: &ProvisionRequest) -> Result<ProvisionRecord, ProvisionError> {
-        let clients = self.clients(&req.region);
-        // Region prep (network, image, security group) then find-or-create.
-        let prep = bootstrap::bootstrap(&clients.ec2, &clients.ssm, req).await?;
-        instance::run_instance(&clients.ec2, &clients.ec2_fail_fast, req, &prep).await
-    }
-
-    async fn wait_running(&self, region: &str, vm_name: &str) -> Result<(), ProvisionError> {
-        instance::wait_running(&self.clients(region).ec2, region, vm_name).await
-    }
-
-    async fn describe(
+    async fn create(
         &self,
-        region: &str,
-        vm_name: &str,
-    ) -> Result<Option<VmInfo>, ProvisionError> {
-        instance::describe(&self.clients(region).ec2, region, vm_name).await
+        offer: &Offer,
+        prepared: &serde_json::Value,
+        spec: &InstanceSpec,
+    ) -> Result<String, ProviderError> {
+        let prepared: bootstrap::Bootstrapped = serde_json::from_value(prepared.clone())
+            .map_err(|e| ProviderError::failed(format!("corrupt bootstrap state: {e}")))?;
+        instance::create(
+            &self.clients(&offer.region).ec2_fail_fast,
+            offer,
+            &prepared,
+            spec,
+        )
+        .await
     }
 
-    async fn terminate(&self, region: &str, vm_name: &str) -> Result<(), ProvisionError> {
-        instance::terminate(&self.clients(region).ec2, region, vm_name).await
+    async fn observe(&self, at: &Location, vm_name: &str) -> Result<Vec<Observed>, ProviderError> {
+        instance::observe(&self.clients(&at.region).ec2, vm_name).await
+    }
+
+    async fn delete(
+        &self,
+        at: &Location,
+        _vm_name: &str,
+        instance_ids: &[String],
+    ) -> Result<(), ProviderError> {
+        instance::delete(&self.clients(&at.region).ec2, instance_ids).await
+    }
+
+    async fn cleanup(&self, at: &Location, vm_name: &str) -> Result<(), ProviderError> {
+        instance::delete_security_group(&self.clients(&at.region).ec2, &at.region, vm_name).await
     }
 }

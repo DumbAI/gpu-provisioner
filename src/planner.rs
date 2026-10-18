@@ -1,39 +1,29 @@
-//! The cloud-agnostic half of planning ("Phase 3"): validate the `VmSpec` and
+//! The cloud-agnostic half of planning: validate the `VmSpec` and
 //! split it into (a) a `ResourceRequest` for the provider to resolve into
-//! cloud-specific `{instance_type, region, zone}` candidates
-//! (`CloudProvider::plan_candidates`), and (b) the candidate-independent
-//! `LaunchSpec`. The cloud-dependent parts — GPU→instance-type mapping and
-//! region/zone conventions — live in each provider (AWS:
-//! `provider/aws/catalog.rs`), mirroring how SkyPilot's optimizer defers to
-//! per-cloud catalogs.
+//! cloud-specific offers (`CloudProvider::plan`), (b) the offer-independent
+//! `InstanceSpec`, and (c) the optional features the launch depends on. The
+//! cloud-dependent parts — GPU→instance-type mapping and region/zone
+//! conventions — live in each provider's catalog.
+//!
+//! Workload concerns (k3s ports, the installer) are not planned here: the
+//! cluster layer (`cluster::k3s`) adapts the `InstanceSpec` to the chosen
+//! provider's capabilities.
 
 use crate::config::Defaults;
-use crate::kube;
-use crate::provider::{Candidate, ProvisionRequest, ResourceAsk, ResourceRequest};
+use crate::provider::{Capabilities, Feature, InstanceSpec, ResourceAsk, ResourceRequest};
 use crate::spec::{SpecError, VmSpec};
-use crate::userdata::{self, Workload};
+use crate::userdata;
 
-/// Ports opened (at security-group creation) for a k3s node: the Kubernetes API
-/// server plus the k3s-bundled Traefik ingress / ServiceLB HTTP(S) endpoints.
-const K3S_PORTS: [u16; 3] = [6443, 80, 443];
-
-/// Everything needed to provision that does NOT vary per candidate.
+/// Output of [`prepare`].
 #[derive(Debug, Clone)]
-pub struct LaunchSpec {
-    pub vm_name: String,
-    pub image_id: Option<String>,
-    pub disk_gb: i32,
-    pub spot: bool,
-    pub extra_ports: Vec<u16>,
-    pub ssh_user: String,
-    pub user_data: String,
-}
-
-/// Output of `prepare`: the invariants plus the resource ask for the provider.
-#[derive(Debug, Clone)]
-pub struct Prepared {
-    pub launch: LaunchSpec,
+pub struct Plan {
+    pub spec: InstanceSpec,
     pub request: ResourceRequest,
+    /// Optional cloud features the user asked for — checked against the
+    /// provider's capabilities before planning.
+    pub required_features: Vec<Feature>,
+    /// Make the VM a k3s cluster (spec/flags, else `[defaults] kubernetes`).
+    pub kubernetes: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,17 +32,18 @@ pub enum PlanError {
     Spec(#[from] SpecError),
     #[error("invalid --gpus value: {0}")]
     InvalidGpus(String),
-    #[error("no candidate regions: pass --region (repeatable) or set defaults.regions in the config file")]
-    NoRegions,
 }
 
-/// Validate the spec and assemble the provider-facing resource request plus
-/// the candidate-independent launch fields.
+/// Validate the spec and assemble the provider-facing request plus the
+/// offer-independent instance fields. `default_regions` is the target cloud's
+/// configured fallback; whether an empty region list is acceptable is the
+/// provider's call (AWS/GCP require regions, Prime Intellect means "any").
 pub fn prepare(
     spec: &VmSpec,
     defaults: &Defaults,
+    default_regions: &[String],
     public_key_openssh: &str,
-) -> Result<Prepared, PlanError> {
+) -> Result<Plan, PlanError> {
     let vm_name = spec.validated_name()?;
 
     let ask = match (&spec.instance_type, &spec.gpus) {
@@ -64,64 +55,59 @@ pub fn prepare(
     };
 
     let regions = if spec.regions.is_empty() {
-        defaults.regions.clone()
+        default_regions.to_vec()
     } else {
         spec.regions.clone()
     };
-    if regions.is_empty() {
-        return Err(PlanError::NoRegions);
-    }
 
     let ssh_user = spec
         .ssh_user
         .clone()
         .unwrap_or_else(|| defaults.ssh_user.clone());
+    let user_data = userdata::build_cloud_init(&ssh_user, public_key_openssh);
 
-    // The k8s ask (opt-in via the spec) both opens the k3s ports and swaps the
-    // cloud-init workload for the k3s installer. GPU-ness is decided at boot by
-    // the script itself, so the plan stays candidate-independent here.
-    let mut extra_ports = spec.ports.clone();
-    let workload = if spec.kubernetes {
-        extra_ports.extend(K3S_PORTS);
-        Workload::K3s {
-            install_script: kube::K3S_INSTALL_SCRIPT,
-        }
-    } else {
-        Workload::Bare
-    };
-    let user_data = userdata::build_cloud_init(&ssh_user, public_key_openssh, &workload);
+    // An explicit k8s ask is a hard requirement; the default is best-effort
+    // (skipped on clouds that cannot host k3s, see `Plan::kubernetes_for`).
+    let required_features = [
+        (spec.ami.is_some(), Feature::ImageOverride),
+        (spec.spot, Feature::Spot),
+        (!spec.ports.is_empty(), Feature::OpenPorts),
+        (spec.kubernetes == Some(true), Feature::Kubernetes),
+    ]
+    .into_iter()
+    .filter_map(|(needed, feature)| needed.then_some(feature))
+    .collect();
 
-    Ok(Prepared {
-        launch: LaunchSpec {
+    Ok(Plan {
+        spec: InstanceSpec {
             vm_name,
             image_id: spec.ami.clone(),
             disk_gb: spec.disk_gb.unwrap_or(defaults.disk_gb),
             spot: spec.spot,
-            extra_ports,
-            ssh_user,
+            open_ports: spec.ports.clone(),
             user_data,
+            ssh_public_key: public_key_openssh.trim().to_string(),
+            ssh_user,
         },
         request: ResourceRequest {
             ask,
             regions,
             zone: spec.zone.clone(),
+            spot: spec.spot,
         },
+        required_features,
+        kubernetes: spec.kubernetes.unwrap_or(defaults.kubernetes),
     })
 }
 
-/// Combine the launch invariants with one provider-produced candidate.
-pub fn build_request(launch: &LaunchSpec, candidate: &Candidate) -> ProvisionRequest {
-    ProvisionRequest {
-        vm_name: launch.vm_name.clone(),
-        region: candidate.region.clone(),
-        zone: candidate.zone.clone(),
-        instance_type: candidate.instance_type.clone(),
-        image_id: launch.image_id.clone(),
-        disk_gb: launch.disk_gb,
-        spot: launch.spot,
-        extra_ports: launch.extra_ports.clone(),
-        user_data: launch.user_data.clone(),
-        ssh_user: launch.ssh_user.clone(),
+impl Plan {
+    /// Whether to set up k3s on a provider with `caps`. An explicit request
+    /// is kept (and rejected by the capability check if unsupported); the
+    /// default is dropped where k3s cannot run (e.g. the Docker test cloud).
+    pub fn kubernetes_for(&self, caps: &Capabilities) -> bool {
+        self.kubernetes
+            && (self.required_features.contains(&Feature::Kubernetes)
+                || caps.supports(Feature::Kubernetes))
     }
 }
 
@@ -140,45 +126,81 @@ mod tests {
         }
     }
 
+    fn plan(spec: &VmSpec) -> Result<Plan, PlanError> {
+        prepare(spec, &Defaults::default(), &[], KEY)
+    }
+
     #[test]
-    fn splits_spec_into_launch_and_request() {
-        let prepared = prepare(&base_spec(), &Defaults::default(), KEY).unwrap();
-        assert_eq!(prepared.launch.vm_name, "vm1");
-        assert!(prepared.launch.user_data.contains(KEY));
+    fn splits_spec_into_instance_spec_and_request() {
+        let plan = plan(&base_spec()).unwrap();
+        assert_eq!(plan.spec.vm_name, "vm1");
+        assert!(plan.spec.user_data.contains(KEY));
+        assert_eq!(plan.spec.ssh_public_key, KEY);
         assert!(matches!(
-            &prepared.request.ask,
+            &plan.request.ask,
             ResourceAsk::InstanceType(it) if it == "t3.micro"
         ));
-        assert_eq!(prepared.request.regions, vec!["us-west-2", "us-east-1"]);
+        assert_eq!(plan.request.regions, vec!["us-west-2", "us-east-1"]);
         // Zone resolution is the provider's job; the pin passes through.
-        assert!(prepared.request.zone.is_none());
+        assert!(plan.request.zone.is_none());
+        assert!(plan.required_features.is_empty());
     }
 
     #[test]
-    fn kubernetes_opens_k3s_ports_and_embeds_installer() {
+    fn kubernetes_does_not_touch_the_instance_plan() {
+        // The cluster layer adds k3s ports/boot script per provider capability.
         let mut spec = base_spec();
-        spec.kubernetes = true;
-        spec.ports = vec![8080];
-        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
-        // User ports are preserved and the k3s ports are added.
-        for p in [8080u16, 6443, 80, 443] {
-            assert!(prepared.launch.extra_ports.contains(&p), "missing port {p}");
-        }
-        // The real installer embeds cleanly and the whole document stays valid YAML.
-        assert!(prepared.launch.user_data.contains("get.k3s.io"));
-        assert!(prepared.launch.user_data.contains("--tls-san"));
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&prepared.launch.user_data).unwrap();
-        assert!(parsed.get("runcmd").is_some());
+        spec.kubernetes = Some(true);
+        let plan = plan(&spec).unwrap();
+        assert!(plan.spec.open_ports.is_empty());
+        assert!(!plan.spec.user_data.contains("k3s"));
     }
 
     #[test]
-    fn non_kubernetes_leaves_ports_and_userdata_bare() {
+    fn kubernetes_defaults_on_and_is_skipped_only_when_implicit() {
+        let no_k3s = Capabilities {
+            unsupported: &[(Feature::Kubernetes, "no systemd")],
+            ..Capabilities::default()
+        };
+        let full = Capabilities::default();
+
+        // Default on; dropped silently where k3s cannot run.
+        let implicit = plan(&base_spec()).unwrap();
+        assert!(implicit.kubernetes);
+        assert!(!implicit.required_features.contains(&Feature::Kubernetes));
+        assert!(implicit.kubernetes_for(&full));
+        assert!(!implicit.kubernetes_for(&no_k3s));
+
+        // Explicit: kept, and required (so an unsupported cloud rejects it).
         let mut spec = base_spec();
+        spec.kubernetes = Some(true);
+        let explicit = plan(&spec).unwrap();
+        assert!(explicit.required_features.contains(&Feature::Kubernetes));
+        assert!(explicit.kubernetes_for(&no_k3s));
+
+        // Opt-outs: the spec, or the config default.
+        spec.kubernetes = Some(false);
+        assert!(!plan(&spec).unwrap().kubernetes);
+        let off = Defaults {
+            kubernetes: false,
+            ..Defaults::default()
+        };
+        assert!(!prepare(&base_spec(), &off, &[], KEY).unwrap().kubernetes);
+    }
+
+    #[test]
+    fn required_features_reflect_the_spec() {
+        let mut spec = base_spec();
+        spec.ami = Some("ami-1".into());
+        spec.spot = true;
         spec.ports = vec![8080];
-        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
-        assert_eq!(prepared.launch.extra_ports, vec![8080]);
-        assert!(!prepared.launch.user_data.contains("k3s"));
-        assert!(!prepared.launch.user_data.contains("write_files"));
+        let plan = plan(&spec).unwrap();
+        assert_eq!(
+            plan.required_features,
+            vec![Feature::ImageOverride, Feature::Spot, Feature::OpenPorts]
+        );
+        assert_eq!(plan.spec.open_ports, vec![8080]);
+        assert!(plan.request.spot);
     }
 
     #[test]
@@ -186,8 +208,7 @@ mod tests {
         let mut spec = base_spec();
         spec.instance_type = None;
         spec.gpus = Some("l40s:4".into());
-        let prepared = prepare(&spec, &Defaults::default(), KEY).unwrap();
-        match &prepared.request.ask {
+        match &plan(&spec).unwrap().request.ask {
             ResourceAsk::Gpus(gpus) => {
                 assert_eq!(gpus.name, "L40S");
                 assert_eq!(gpus.count, 4);
@@ -201,27 +222,18 @@ mod tests {
         let mut spec = base_spec();
         spec.instance_type = None;
         spec.gpus = Some("L40S:x".into());
-        assert!(matches!(
-            prepare(&spec, &Defaults::default(), KEY),
-            Err(PlanError::InvalidGpus(_))
-        ));
+        assert!(matches!(plan(&spec), Err(PlanError::InvalidGpus(_))));
     }
 
     #[test]
-    fn falls_back_to_default_regions_and_errors_when_none() {
+    fn falls_back_to_provider_default_regions_and_allows_none() {
         let mut spec = base_spec();
         spec.regions = Vec::new();
-        let defaults = Defaults {
-            regions: vec!["eu-central-1".into()],
-            ..Default::default()
-        };
-        let prepared = prepare(&spec, &defaults, KEY).unwrap();
-        assert_eq!(prepared.request.regions, vec!["eu-central-1"]);
-
-        assert!(matches!(
-            prepare(&spec, &Defaults::default(), KEY),
-            Err(PlanError::NoRegions)
-        ));
+        let plan_with =
+            prepare(&spec, &Defaults::default(), &["eu-central-1".into()], KEY).unwrap();
+        assert_eq!(plan_with.request.regions, vec!["eu-central-1"]);
+        // No regions at all is the provider's call to accept or reject.
+        assert!(plan(&spec).unwrap().request.regions.is_empty());
     }
 
     #[test]
@@ -229,29 +241,14 @@ mod tests {
         let mut spec = base_spec();
         spec.gpus = Some("T4:1".into());
         assert!(matches!(
-            prepare(&spec, &Defaults::default(), KEY),
+            plan(&spec),
             Err(PlanError::Spec(SpecError::InstanceTypeXorGpus))
         ));
         spec.instance_type = None;
         spec.gpus = None;
         assert!(matches!(
-            prepare(&spec, &Defaults::default(), KEY),
+            plan(&spec),
             Err(PlanError::Spec(SpecError::InstanceTypeXorGpus))
         ));
-    }
-
-    #[test]
-    fn build_request_combines_launch_and_candidate() {
-        let prepared = prepare(&base_spec(), &Defaults::default(), KEY).unwrap();
-        let candidate = Candidate {
-            instance_type: "g6e.8xlarge".into(),
-            region: "us-east-2".into(),
-            zone: Some("us-east-2a".into()),
-        };
-        let request = build_request(&prepared.launch, &candidate);
-        assert_eq!(request.vm_name, "vm1");
-        assert_eq!(request.instance_type, "g6e.8xlarge");
-        assert_eq!(request.region, "us-east-2");
-        assert_eq!(request.zone.as_deref(), Some("us-east-2a"));
     }
 }

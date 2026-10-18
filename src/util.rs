@@ -86,3 +86,37 @@ pub fn now_unix() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+/// `YYYY-MM-DD HH:MM:SS` (UTC) for a unix timestamp — enough for log-style
+/// output without a date-time dependency (Howard Hinnant's civil-from-days).
+pub fn format_unix_utc(ts: i64) -> String {
+    let days = ts.div_euclid(86_400);
+    let secs = ts.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        secs / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    )
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::format_unix_utc;
+
+    #[test]
+    fn formats_known_instants() {
+        assert_eq!(format_unix_utc(0), "1970-01-01 00:00:00");
+        assert_eq!(format_unix_utc(951_782_400), "2000-02-29 00:00:00");
+        assert_eq!(format_unix_utc(1_792_359_127), "2026-10-18 21:32:07");
+    }
+}

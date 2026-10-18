@@ -2,8 +2,25 @@
 name = "gpu-provisioner"
 version = "0.1.0"
 edition = "2021"
-description = "Mini-SkyPilot: provision a cloud VM (AWS) with failover and SSH into it"
+rust-version = "1.91.1"
+description = "Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters"
 license = "Apache-2.0"
+repository = "https://github.com/DumbAI/gpu-provisioner"
+homepage = "https://github.com/DumbAI/gpu-provisioner"
+documentation = "https://docs.rs/gpu-provisioner"
+readme = "README.md"
+keywords = ["gpu", "cloud", "provisioning", "k3s", "kubernetes"]
+categories = ["command-line-utilities", "development-tools", "virtualization"]
+# Ship only what builds and documents the crate (no docs site, design docs or CI).
+include = [
+    "src/**/*",
+    "tests/**/*",
+    "examples/*.yaml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+]
 
 [[bin]]
 name = "gpuprov"
@@ -24,6 +41,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 rand_core = { version = "0.6", features = ["std"] }
+reqwest = { version = "0.13", features = ["json", "query"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +55,7 @@ tokio = { version = "1", features = [
     "time",
     "net",
     "io-util",
+    "signal",
 ] }
 toml = "0.8"
 tracing = "0.1"
@@ -45,6 +64,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"
 
 [profile.release]
 strip = true

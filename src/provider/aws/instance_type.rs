@@ -1,15 +1,12 @@
-//! Live instance-type metadata — the catalog-less analog of SkyPilot's
-//! instance catalog: `DescribeInstanceTypes` supplies GPU/architecture facts
-//! (SkyPilot: `get_accelerators_from_instance_type` /
-//! `get_arch_from_instance_type` from CSVs), and
-//! `DescribeInstanceTypeOfferings` supplies per-AZ availability (SkyPilot:
-//! `valid_on_region_zones` zone filtering).
+//! Live instance-type metadata instead of a bundled catalog:
+//! `DescribeInstanceTypes` supplies GPU/architecture facts, and
+//! `DescribeInstanceTypeOfferings` supplies per-AZ availability.
 
 use std::collections::HashSet;
 
 use aws_sdk_ec2::types::{InstanceType, LocationType};
 
-use crate::provider::ProvisionError;
+use crate::provider::ProviderError;
 
 use super::{error, filter};
 
@@ -49,7 +46,7 @@ pub async fn instance_type_meta(
     ec2: &aws_sdk_ec2::Client,
     region: &str,
     instance_type: &str,
-) -> Result<InstanceTypeMeta, ProvisionError> {
+) -> Result<InstanceTypeMeta, ProviderError> {
     let resp = ec2
         .describe_instance_types()
         .instance_types(InstanceType::from(instance_type))
@@ -59,10 +56,9 @@ pub async fn instance_type_meta(
         Ok(resp) => match resp.instance_types().first() {
             Some(info) => info.clone(),
             None => {
-                return Err(ProvisionError::Config {
-                    region: region.to_string(),
-                    msg: format!("unknown instance type '{instance_type}'"),
-                })
+                return Err(ProviderError::unavailable(format!(
+                    "unknown instance type '{instance_type}'"
+                )))
             }
         },
         Err(e) => {
@@ -71,18 +67,13 @@ pub async fn instance_type_meta(
                 code.as_deref(),
                 Some("InvalidInstanceType") | Some("InvalidParameterValue")
             ) {
-                return Err(ProvisionError::Config {
-                    region: region.to_string(),
-                    msg: format!(
-                        "unknown instance type '{instance_type}': {}",
-                        error::describe(&e)
-                    ),
-                });
+                return Err(ProviderError::unavailable(format!(
+                    "unknown instance type '{instance_type}': {}",
+                    error::describe(&e)
+                )));
             }
             if error::classify(&e) == error::AwsErrorClass::Credentials {
-                return Err(ProvisionError::Credentials {
-                    msg: error::describe(&e),
-                });
+                return Err(ProviderError::credentials(error::describe(&e)));
             }
             tracing::warn!(
                 "[{region}] DescribeInstanceTypes failed ({}); falling back to \
@@ -190,16 +181,15 @@ pub fn fallback_meta(instance_type: &str) -> InstanceTypeMeta {
 /// region. Empty set = the type is not sold in the region at all.
 pub async fn zones_offering(
     ec2: &aws_sdk_ec2::Client,
-    region: &str,
     instance_type: &str,
-) -> Result<HashSet<String>, ProvisionError> {
+) -> Result<HashSet<String>, ProviderError> {
     let resp = ec2
         .describe_instance_type_offerings()
         .location_type(LocationType::AvailabilityZone)
         .filters(filter("instance-type", instance_type))
         .send()
         .await
-        .map_err(error::in_bootstrap(region))?;
+        .map_err(error::in_bootstrap)?;
     Ok(resp
         .instance_type_offerings()
         .iter()
