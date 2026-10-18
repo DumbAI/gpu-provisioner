@@ -1107,6 +1107,10 @@ machines' 5-second polls and 30-second backoffs cost nothing. Database tests use
 <td><code>.github/workflows/integration.yml</code></td>
 <td>the Docker e2e suite on Linux, with <code>GPUPROV_E2E_REQUIRE_DOCKER=1</code> so a missing daemon fails the job instead of skipping</td>
 </tr>
+<tr>
+<td><code>.github/workflows/docs.yml</code></td>
+<td>strict MkDocs build on docs PRs; deploys to GitHub Pages on pushes to <code>main</code></td>
+</tr>
 </tbody>
 </table>
 <h2 id="manual-testing-against-real-clouds">Manual testing against real clouds<a class="headerlink" href="#manual-testing-against-real-clouds" title="Permanent link">&para;</a></h2>
