@@ -15,6 +15,7 @@
 //! | `capacity_failover` | the vendor's documented capacity error on create makes gpuprov compensate and launch the next offer |
 //! | `interrupt` | cancelling while the instance boots tears it down: nothing left |
 //! | `reuse` | provisioning the same name again adopts the running instance (no second create) |
+//! | `health` | `gpuprov health` reports the running VM healthy from the vendor's view, then **gone** after the vendor reclaims it behind gpuprov's back; `down` still cleans up |
 //! | `boot_script` | on clouds that run a boot script, the script reaches the vendor in its native form (cloud-init `user_data`, a startup-script resource, …) and teardown removes every boot-script resource |
 
 use std::path::Path;
@@ -30,6 +31,7 @@ use gpu_provisioner::provider::{self, BootScript, CloudProvider, SshEndpoint};
 use gpu_provisioner::spec::VmSpec;
 use gpu_provisioner::ssh::keys;
 use gpu_provisioner::util::Paths;
+use gpu_provisioner::vm::health::{self, HealthOptions, HealthProbes, Source, Verdict};
 use gpu_provisioner::vm::launch::{Connector, LaunchMachine, LaunchState, ReadyVm};
 use gpu_provisioner::vm::teardown::{TeardownMachine, TeardownState};
 
@@ -84,6 +86,10 @@ pub trait VendorStub: Sized + Send + Sync {
     fn boot_payloads(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Simulate the vendor reclaiming every instance behind gpuprov's back
+    /// (spot eviction, preemption, account-side termination).
+    fn reclaim(&self);
 }
 
 /// Accepts every SSH probe and records the endpoints it was asked to reach.
@@ -347,6 +353,72 @@ pub async fn reuse<S: VendorStub>() {
     assert_no_leftovers(&stub, &run);
 }
 
+/// Probes that always succeed: the stub has no real host behind it.
+struct ReachableProbes;
+
+#[async_trait]
+impl HealthProbes for ReachableProbes {
+    async fn ping(&self, _: &str) -> bool {
+        true
+    }
+    async fn tcp(&self, _: &str, _: u16) -> bool {
+        true
+    }
+    async fn ssh(&self, _: &SshEndpoint, _: &str, _: &Path) -> Result<(), String> {
+        Ok(())
+    }
+    async fn exec(
+        &self,
+        _: &SshEndpoint,
+        _: &str,
+        _: &Path,
+        _: &str,
+    ) -> Result<(bool, String), String> {
+        Ok((true, String::new()))
+    }
+}
+
+/// Health from the vendor's view: healthy while running, gone once the
+/// vendor reclaims the instance; teardown still completes afterwards.
+pub async fn health<S: VendorStub>() {
+    let stub = S::start().await;
+    let run = Run::new(&stub, "stub-health").await;
+    ready(&run, run.launch(Cancel::new()).await);
+
+    let record = run.db.get(&run.name).unwrap().unwrap();
+    let report = health::check(
+        Some(&*run.provider),
+        &record,
+        &ReachableProbes,
+        HealthOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        (report.verdict, report.source),
+        (Verdict::Healthy, Source::Vendor),
+        "{}: {report:#?}",
+        S::CLOUD
+    );
+
+    stub.reclaim();
+    let report = health::check(
+        Some(&*run.provider),
+        &record,
+        &ReachableProbes,
+        HealthOptions::default(),
+    )
+    .await;
+    assert_eq!(
+        report.verdict,
+        Verdict::Gone,
+        "{}: a reclaimed instance must be reported gone: {report:#?}",
+        S::CLOUD
+    );
+
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_no_leftovers(&stub, &run);
+}
+
 /// A boot script reaches the vendor natively and is fully cleaned up. The
 /// same structured `BootScript` the k3s layer uses, with a marker body.
 pub async fn boot_script<S: VendorStub>() {
@@ -400,6 +472,11 @@ macro_rules! vendor_suite {
         #[tokio::test]
         async fn reprovision_reuses_the_running_instance() {
             $crate::stubs::harness::reuse::<$stub>().await
+        }
+
+        #[tokio::test]
+        async fn health_reports_a_reclaimed_vm_as_gone() {
+            $crate::stubs::harness::health::<$stub>().await
         }
 
         #[tokio::test]

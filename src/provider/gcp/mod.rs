@@ -34,8 +34,8 @@ use serde_json::{json, Value};
 
 use crate::config::GcpConfig;
 use crate::provider::{
-    Capabilities, CloudProvider, InstanceSpec, Location, Observed, Offer, ProviderError,
-    ResourceAsk, ResourceRequest,
+    pick_instance, Capabilities, CloudProvider, Diagnosis, InstanceSpec, Location, Observed, Offer,
+    ProviderError, ResourceAsk, ResourceRequest,
 };
 
 use api::{Api, Instance, Operation, TokenSource};
@@ -417,6 +417,28 @@ impl CloudProvider for GcpProvider {
         let mut observed: Vec<Observed> = instances.iter().map(instance::to_observed).collect();
         observed.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
         Ok(observed)
+    }
+
+    /// Adds Compute Engine's preemption, maintenance and shutdown signals
+    /// (`instance::findings`) for the chosen instance.
+    async fn diagnose(
+        &self,
+        at: &Location,
+        vm_name: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Diagnosis, ProviderError> {
+        let instances = self
+            .list_instances(at, vm_name)
+            .await
+            .map_err(|e| classify_http(&e, Phase::Runtime))?;
+        let observed: Vec<Observed> = instances.iter().map(instance::to_observed).collect();
+        let instance = pick_instance(observed, instance_id);
+        let findings = instance
+            .as_ref()
+            .and_then(|o| instances.iter().find(|i| i.name == o.instance_id))
+            .map(instance::findings)
+            .unwrap_or_default();
+        Ok(Diagnosis { instance, findings })
     }
 
     async fn delete(

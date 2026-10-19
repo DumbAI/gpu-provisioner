@@ -306,6 +306,10 @@ impl VendorStub for RunpodStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        self.server.state().pods.clear();
+    }
+
     fn expected_login(&self) -> (String, u16) {
         ("root".into(), SSH_PORT)
     }

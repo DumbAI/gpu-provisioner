@@ -21,6 +21,10 @@
 //! | `GET /api/v1/instances` | [List running instances](https://docs.lambda.ai/api/cloud#listInstances) | `page_token` pagination (honors `page_size`) |
 //! | `POST /api/v1/instance-operations/terminate` | [Terminate instances](https://docs.lambda.ai/api/cloud#terminateInstance) | `{data: {terminated_instances}}`; unknown/terminated ids → `404 global/object-does-not-exist` |
 //!
+//! Health signals: `LambdaStub::set_status` flips instances to the
+//! documented `unhealthy` / `preempted` statuses (`InstanceStatus` enum),
+//! and `first_healthy` is set when an instance first becomes `active`.
+//!
 //! Instances start `booting`, become `active` with a public `ip` after one
 //! list, and after termination are `terminating` for one list, `terminated`
 //! for the next, then gone. Login is `ubuntu`@22 (created by cloud-init).
@@ -34,6 +38,8 @@ use super::harness::{vendor_suite, Ask, VendorStub};
 use super::route::{body, header, json, last_segment, query, Ids, StubServer};
 
 const API_KEY: &str = "lambda-test-key";
+/// `first_healthy` the stub reports once an instance becomes `active`.
+const FIRST_HEALTHY: &str = "2026-10-19T00:00:00Z";
 
 #[derive(Debug)]
 struct Instance {
@@ -47,6 +53,8 @@ struct Instance {
     /// Lists left before `booting` becomes `active` (`u32::MAX` = held).
     boot_lists: u32,
     ip: String,
+    /// When the instance first became `active` (`Instance.first_healthy`).
+    first_healthy: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -143,7 +151,7 @@ fn instance_json(i: &Instance) -> Value {
             "architecture": "x86_64",
         },
         "hostname": i.name,
-        "first_healthy": null,
+        "first_healthy": i.first_healthy,
         "actions": {},
         "tags": i.tags.iter().map(|(k, v)| json!({"key": k, "value": v})).collect::<Vec<_>>(),
     });
@@ -152,6 +160,15 @@ fn instance_json(i: &Instance) -> Value {
         v["private_ip"] = json!("10.0.0.5");
     }
     v
+}
+
+impl LambdaStub {
+    /// Give every instance a Lambda status (e.g. `unhealthy`, `preempted`).
+    pub fn set_status(&self, status: &'static str) {
+        for instance in self.server.state().instances.iter_mut() {
+            instance.status = status;
+        }
+    }
 }
 
 #[async_trait]
@@ -364,6 +381,7 @@ impl VendorStub for LambdaStub {
                         status: "booting",
                         boot_lists: if account.hold_boot { u32::MAX } else { 1 },
                         ip: format!("198.51.100.{n}"),
+                        first_healthy: None,
                     });
                     if let Some(user_data) = spec["user_data"].as_str() {
                         account.boot_payloads.push(user_data.to_string());
@@ -385,7 +403,10 @@ impl VendorStub for LambdaStub {
                     for i in account.instances.iter_mut() {
                         match i.status {
                             "booting" if i.boot_lists == u32::MAX => {}
-                            "booting" if i.boot_lists == 0 => i.status = "active",
+                            "booting" if i.boot_lists == 0 => {
+                                i.status = "active";
+                                i.first_healthy = Some(FIRST_HEALTHY);
+                            }
                             "booting" => i.boot_lists -= 1,
                             "terminating" => i.status = "terminated",
                             _ => {}
@@ -502,6 +523,10 @@ impl VendorStub for LambdaStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        self.server.state().instances.clear();
+    }
+
     fn boot_payloads(&self) -> Vec<String> {
         self.server.state().boot_payloads.clone()
     }
@@ -556,4 +581,96 @@ async fn open_port_ruleset_is_attached_and_removed() {
     }
     assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
+}
+
+/// `gpuprov health` reads Lambda's own statuses: `unhealthy` (with its
+/// `first_healthy` history) and `preempted` make the VM unhealthy.
+#[tokio::test]
+async fn health_reads_lambda_unhealthy_and_preempted() {
+    use super::harness::Run;
+    use gpu_provisioner::machine::Cancel;
+    use gpu_provisioner::vm::health::{self, HealthOptions, Source, Verdict};
+    use gpu_provisioner::vm::launch::LaunchState;
+    use gpu_provisioner::vm::teardown::TeardownState;
+
+    let stub = LambdaStub::start().await;
+    let run = Run::new(&stub, "stub-diag").await;
+    let end = run.launch(Cancel::new()).await;
+    assert!(
+        matches!(end, LaunchState::Ready(_)),
+        "{end:?}\n{}",
+        run.journal()
+    );
+    let record = run.db.get(&run.name).unwrap().unwrap();
+    let check = || {
+        health::check(
+            Some(&*run.provider),
+            &record,
+            &probes::Reachable,
+            HealthOptions::default(),
+        )
+    };
+
+    let report = check().await;
+    assert_eq!(
+        (report.verdict, report.source),
+        (Verdict::Healthy, Source::Vendor)
+    );
+
+    stub.set_status("unhealthy");
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Unhealthy, "{report:#?}");
+    assert!(
+        report.checks.iter().any(|c| c.detail
+            == format!("Lambda reports the instance unhealthy (was healthy from {FIRST_HEALTHY})")),
+        "{report:#?}"
+    );
+
+    stub.set_status("preempted");
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Unhealthy, "{report:#?}");
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.detail == "preempted by Lambda"),
+        "{report:#?}"
+    );
+
+    stub.set_status("active");
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
+}
+
+/// Probes that always succeed: the stub has no real host behind its IPs.
+mod probes {
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use gpu_provisioner::provider::SshEndpoint;
+    use gpu_provisioner::vm::health::HealthProbes;
+
+    pub struct Reachable;
+
+    #[async_trait]
+    impl HealthProbes for Reachable {
+        async fn ping(&self, _: &str) -> bool {
+            true
+        }
+        async fn tcp(&self, _: &str, _: u16) -> bool {
+            true
+        }
+        async fn ssh(&self, _: &SshEndpoint, _: &str, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        async fn exec(
+            &self,
+            _: &SshEndpoint,
+            _: &str,
+            _: &Path,
+            _: &str,
+        ) -> Result<(bool, String), String> {
+            Ok((true, String::new()))
+        }
+    }
 }

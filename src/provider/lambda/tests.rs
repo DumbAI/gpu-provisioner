@@ -28,6 +28,43 @@ fn base_instance(status: &str) -> serde_json::Value {
 }
 
 #[test]
+fn unhealthy_and_preempted_become_critical_findings() {
+    let mut never = base_instance("unhealthy");
+    never["first_healthy"] = json!(null);
+    let findings = findings_for(&instance(never));
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].severity, crate::provider::Severity::Critical);
+    assert!(
+        findings[0].message.contains("never became healthy"),
+        "{findings:?}"
+    );
+
+    let mut was = base_instance("unhealthy");
+    was["first_healthy"] = json!("2026-10-19T00:00:00Z");
+    assert!(findings_for(&instance(was))[0]
+        .message
+        .contains("was healthy from 2026-10-19T00:00:00Z"));
+
+    let preempted = findings_for(&instance(base_instance("preempted")));
+    assert_eq!(preempted[0].message, "preempted by Lambda");
+    assert!(findings_for(&instance(base_instance("active"))).is_empty());
+}
+
+#[test]
+fn diagnosis_picks_the_recorded_instance_and_attaches_its_findings() {
+    let mut other = base_instance("active");
+    other["id"] = json!("i-2");
+    let instances = [instance(base_instance("unhealthy")), instance(other)];
+    let diagnosis = diagnosis_from(&instances, Some("i-1"));
+    assert_eq!(diagnosis.instance.unwrap().instance_id, "i-1");
+    assert_eq!(diagnosis.findings.len(), 1);
+
+    // Terminated instances are gone: no instance, no findings.
+    let gone = diagnosis_from(&[instance(base_instance("terminated"))], Some("i-1"));
+    assert!(gone.instance.is_none() && gone.findings.is_empty());
+}
+
+#[test]
 fn instance_status_and_endpoint_mapping() {
     let active = to_observed(&instance(base_instance("active"))).unwrap();
     assert!(active.is_ready());

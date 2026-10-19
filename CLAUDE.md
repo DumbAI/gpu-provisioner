@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`gpuprov` (Rust) provisions a GPU VM on AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect or RunPod (plus a local Docker "test cloud") with failover across offers/regions/zones, makes it a validated single-node **k3s** cluster by default (`--no-k8s` / `[defaults] kubernetes = false` opt out), waits for SSH, and records it locally. The project stands on its own: don't describe it, or its modules, in terms of other tools (no "port of"/"analog of" references in code, docs, or metadata) — explain behavior and rationale directly.
+`gpuprov` (Rust) provisions a GPU VM on AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect or RunPod (plus a local Docker "test cloud") with failover across offers/regions/zones, makes it a validated single-node **k3s** cluster by default (`--no-k8s` / `[defaults] kubernetes = false` opt out), waits for SSH, and records it locally. The project stands on its own: don't describe it, or its modules, in terms of other tools (no "port of"/"analog of" references in code, docs, or metadata) — explain behavior and rationale directly.
 
 Binary: `gpuprov` (`src/main.rs`). Library: `gpu_provisioner` (`src/lib.rs`). Design doc (the "why"): `docs/architecture/state-machines.md`. `doc/PRD_DRAFT.md` is the product draft.
 
@@ -38,7 +38,7 @@ vm/launch.rs     LaunchMachine: Reconciling → Planning → [Preparing → Crea
 vm/teardown.rs   Teardown sub-machine (Requesting → AwaitingGone → CleaningUp) — used by `down` AND launch compensation
 machine/         Executor<M: Machine>: write-ahead journal, retry budgets/backoff, Poll, cancel-at-step-boundary, resume, lease
 provider/mod.rs  CloudProvider trait: capabilities, plan, prepare, create, observe, delete, cleanup
-  provider/{aws,gcp,massedcompute,hyperstack,lambda,verda,primeintellect,runpod,docker}/  — the ONLY code that talks to a cloud API
+  provider/{aws,gcp,massedcompute,hyperstack,lambda,digitalocean,verda,primeintellect,runpod,docker}/  — the ONLY code that talks to a cloud API
 ```
 
 **The split that matters:** adapters expose small idempotent primitives and classify errors — they never loop, sleep or retry (except a bounded wait on a cloud operation whose *result* carries the error, e.g. GCP `operations.wait`). All waiting, retries, failover, compensation and recovery live once in the core. Don't add retry loops to adapters; return `ErrorKind::Transient`.
@@ -58,8 +58,9 @@ provider/mod.rs  CloudProvider trait: capabilities, plan, prepare, create, obser
 - `kube.rs` — the k3s installer and single-shot SSH primitives: `probe_boot` (+ pure `BootProbe::decide`), `install`, `api_ready`, `fetch_kubeconfig`, `health` (one round trip, incl. cert-SAN check), `reachable`. The installer has two routes: **boot** (`K3sMachine::new` sets it as the structured `InstanceSpec::boot_script` when `Capabilities::boot_script`; each adapter delivers it natively — AWS/GCP via `userdata::render` into cloud-init, Verda as a startup-script resource via `BootScript::to_shell`; never put cloud-specific formats in the k3s layer) and **SSH** (fallback chosen by `CheckingBootInstall` when the boot run is missing/failed/timed out or missed a GPU). It is `flock`-serialized, writes a status marker (`/var/lib/gpuprov/k3s-install.status`), owns `/etc/rancher/k3s/config.yaml` (rendered from a SAN list; restart only on change), and finds the public IP via AWS/GCP metadata at boot; `Validating` re-runs it once with the SAN if the cert lacks it. `embedded_scripts_parse_as_bash` runs `bash -n` on every embedded script. Access mode: `Direct` when the provider supports `OpenPorts`, else `SshTunnel` (`gpuprov tunnel`, local 16443).
 - **k3s default:** `VmSpec.kubernetes: Option<bool>` (CLI `--k8s`/`--no-k8s` > spec > `[defaults] kubernetes`, default true). An explicit ask adds `Feature::Kubernetes` (hard requirement); the implicit default is dropped via `Plan::kubernetes_for` on providers that don't support it (Docker), with a note. `main` stores the resolved choice in `spec_json`.
 - `ssh/` — shared ed25519 keypair, single `probe` (TCP banner + login; the polling lives in `Connecting`), runner (`run_command`, `run_command_capture`, `exec_interactive`, `exec_forward`), per-VM ssh config (with `Port`). ControlMaster is skipped when the socket path would exceed ~104 bytes.
+- `vm/health.rs` — read-only `gpuprov health`: `resolve` (name / instance id / IP; unrecorded IP → `Target::Address`), then a ladder record → vendor (`CloudProvider::diagnose`, overridable per cloud to add `Finding`s; default from `observe`) → ping → TCP → SSH → (`--deep`) gpu, k3s. Vendor unavailable ⇒ `Source::Network` fallback (silence = `Unknown`, never `Gone`). Probes sit behind `HealthProbes` for tests; vendor stubs implement `reclaim()` for the shared health scenario.
 - `userdata.rs` — cloud-init (login user + key) for clouds that boot with it.
-- `config.rs` — `[aws] [gcp] [primeintellect] [docker] [defaults]`, `deny_unknown_fields`; credentials resolve config → env → the cloud's own CLI files.
+- `config.rs` — `[aws] [gcp] [primeintellect] [runpod] [verda] [massedcompute] [hyperstack] [lambda] [digitalocean] [docker] [defaults]`, `deny_unknown_fields`; credentials resolve config → env → the cloud's own CLI files.
 
 **Scope / non-goals** (don't build without being asked): one VM per name, terminate-only teardown (no stop/resume), no spot-preemption recovery, no storage mounts, single-node k3s only. `examples/*.yaml` are k8s manifests for `--k8s` clusters, not VM specs.
 

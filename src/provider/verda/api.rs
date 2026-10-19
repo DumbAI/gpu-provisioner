@@ -127,6 +127,9 @@ pub struct Instance {
     pub os_volume_id: Option<String>,
     #[serde(default)]
     pub volume_ids: Vec<String>,
+    /// Spot instances may be evicted (`discontinued`) when capacity is needed.
+    #[serde(default)]
+    pub is_spot: bool,
 }
 
 /// A volume (`GET /v1/volumes`), trimmed to what cleanup reads.

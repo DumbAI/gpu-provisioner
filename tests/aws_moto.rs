@@ -61,6 +61,7 @@ use gpu_provisioner::config::{AppConfig, AwsConfig};
 use gpu_provisioner::db::VmState;
 use gpu_provisioner::machine::Cancel;
 use gpu_provisioner::provider::SshEndpoint;
+use gpu_provisioner::vm::health::{self, HealthOptions, Verdict};
 use gpu_provisioner::vm::launch::{Connector, LaunchState, ReadyVm};
 use gpu_provisioner::vm::teardown::TeardownState;
 
@@ -254,6 +255,47 @@ async fn ensure_public_default_vpc(ec2: &aws_sdk_ec2::Client) {
 impl VendorStub for Moto {
     const CLOUD: &'static str = "aws";
 
+    /// Terminate this run's instances directly in moto, as AWS does when it
+    /// reclaims a spot instance. `reclaim` is synchronous, so the async EC2
+    /// call runs on a scoped thread with its own runtime and client.
+    fn reclaim(&self) {
+        let names = self.names.lock().unwrap().clone();
+        let endpoint = self.endpoint.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                rt.block_on(async {
+                    let ec2 = ec2(&endpoint).await;
+                    let mut ids = Vec::new();
+                    for name in &names {
+                        let resp = ec2
+                            .describe_instances()
+                            .filters(filter("tag:gpuprov-vm-name", name))
+                            .send()
+                            .await
+                            .expect("moto DescribeInstances");
+                        ids.extend(
+                            resp.reservations()
+                                .iter()
+                                .flat_map(|r| r.instances())
+                                .filter_map(|i| i.instance_id().map(str::to_string)),
+                        );
+                    }
+                    if !ids.is_empty() {
+                        ec2.terminate_instances()
+                            .set_instance_ids(Some(ids))
+                            .send()
+                            .await
+                            .expect("moto TerminateInstances");
+                    }
+                });
+            });
+        });
+    }
+
     async fn start() -> Self {
         let endpoint = endpoint().expect("callers check endpoint() first");
         Moto::connect(endpoint).await
@@ -422,5 +464,126 @@ async fn interrupt_after_create_cleans_up() {
         1,
         "one instance was created: {instances:?}"
     );
+    assert_no_leftovers(&moto, &run).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a moto server; see module docs"]
+async fn health_reports_a_reclaimed_vm_as_gone() {
+    let Some(endpoint) = endpoint() else { return };
+    let moto = Moto::connect(endpoint).await;
+    let run = run(&moto, "moto-health").await;
+    ready(&run, run.launch(Cancel::new()).await);
+    let record = run.db.get(&run.name).unwrap().unwrap();
+
+    let report = health::check(
+        Some(&*run.provider),
+        &record,
+        &AlwaysReachable,
+        HealthOptions::default(),
+    )
+    .await;
+    assert_eq!(report.verdict, Verdict::Healthy, "{report:#?}");
+
+    // AWS reclaims the instance behind gpuprov's back.
+    moto.reclaim();
+    let report = health::check(
+        Some(&*run.provider),
+        &record,
+        &AlwaysReachable,
+        HealthOptions::default(),
+    )
+    .await;
+    assert_eq!(report.verdict, Verdict::Gone, "{report:#?}");
+
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_no_leftovers(&moto, &run).await;
+}
+
+/// Probes that always succeed: moto has no real host behind its IPs.
+struct AlwaysReachable;
+
+#[async_trait::async_trait]
+impl health::HealthProbes for AlwaysReachable {
+    async fn ping(&self, _: &str) -> bool {
+        true
+    }
+    async fn tcp(&self, _: &str, _: u16) -> bool {
+        true
+    }
+    async fn ssh(
+        &self,
+        _: &gpu_provisioner::provider::SshEndpoint,
+        _: &str,
+        _: &std::path::Path,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn exec(
+        &self,
+        _: &gpu_provisioner::provider::SshEndpoint,
+        _: &str,
+        _: &std::path::Path,
+        _: &str,
+    ) -> Result<(bool, String), String> {
+        Ok((true, String::new()))
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a moto server; see module docs"]
+async fn diagnose_attributes_a_reclaim() {
+    let Some(endpoint) = endpoint() else { return };
+    let moto = Moto::connect(endpoint).await;
+    let run = run(&moto, "moto-diag").await;
+    let vm = ready(&run, run.launch(Cancel::new()).await);
+    let at = gpu_provisioner::provider::Location {
+        region: REGION.into(),
+        zone: None,
+    };
+
+    // A healthy instance: found, no critical vendor findings.
+    let healthy = run
+        .provider
+        .diagnose(&at, &run.name, Some(&vm.instance_id))
+        .await
+        .expect("diagnose");
+    assert_eq!(
+        healthy.instance.as_ref().map(|i| i.instance_id.as_str()),
+        Some(vm.instance_id.as_str())
+    );
+    assert!(
+        !healthy
+            .findings
+            .iter()
+            .any(|f| f.severity == gpu_provisioner::provider::Severity::Critical),
+        "{healthy:?}"
+    );
+
+    // AWS reclaims it: gone, with the termination attributed.
+    moto.reclaim();
+    let gone = run
+        .provider
+        .diagnose(&at, &run.name, Some(&vm.instance_id))
+        .await
+        .expect("diagnose");
+    assert!(gone.instance.is_none(), "{gone:?}");
+    let critical: Vec<&str> = gone
+        .findings
+        .iter()
+        .filter(|f| f.severity == gpu_provisioner::provider::Severity::Critical)
+        .map(|f| f.message.as_str())
+        .collect();
+    assert_eq!(critical.len(), 1, "{gone:?}");
+    // moto records `Client.UserInitiatedShutdown` for TerminateInstances.
+    assert_eq!(
+        critical[0],
+        format!(
+            "{} terminated from outside gpuprov (user/API)",
+            vm.instance_id
+        )
+    );
+
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
     assert_no_leftovers(&moto, &run).await;
 }

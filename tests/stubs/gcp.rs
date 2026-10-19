@@ -27,6 +27,11 @@
 //! | `GET /projects/{p}/aggregated/instances` | [instances.aggregatedList](https://cloud.google.com/compute/docs/reference/rest/v1/instances/aggregatedList) | same, grouped by `zones/<zone>` |
 //! | `DELETE /projects/{p}/zones/{zone}/instances/{name}` | [instances.delete](https://cloud.google.com/compute/docs/reference/rest/v1/instances/delete) | zonal `Operation`; instance `STOPPING` for one list, then gone |
 //!
+//! Health signals (Instance resource fields `scheduling.provisioningModel`,
+//! `lastStopTimestamp`, `resourceStatus.upcomingMaintenance`): `preempt_all`
+//! stops spot VMs as Compute Engine does (`TERMINATED`, still listed) and
+//! `schedule_maintenance` adds an `UpcomingMaintenance` window.
+//!
 //! A successful insert creates the instance `PROVISIONING`; it is `STAGING`
 //! (with a `natIP`) after one list and `RUNNING` after the next. Login is
 //! `ubuntu`@22 (from the `ssh-keys` metadata).
@@ -60,6 +65,14 @@ struct Instance {
     /// Lists left in the current boot stage (`u32::MAX` = held).
     boot_lists: u32,
     nat_ip: String,
+    /// `scheduling.provisioningModel == "SPOT"` (from the insert body).
+    spot: bool,
+    /// Stopped by Compute Engine (`TERMINATED`, kept listed) — a preemption.
+    preempted: bool,
+    /// `lastStopTimestamp` of the preemption.
+    last_stop: Option<&'static str>,
+    /// `resourceStatus.upcomingMaintenance`, when scheduled.
+    maintenance: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -195,12 +208,27 @@ fn instance_json(i: &Instance) -> Value {
         }],
         "creationTimestamp": "2026-10-19T00:00:00.000-07:00",
         "selfLink": link(&format!("zones/{}/instances/{}", i.zone, i.name)),
+        "scheduling": {
+            "provisioningModel": if i.spot { "SPOT" } else { "STANDARD" },
+            "preemptible": false,
+            "automaticRestart": !i.spot,
+            "onHostMaintenance": "TERMINATE",
+        },
+        "lastStopTimestamp": i.last_stop,
+        "resourceStatus": match &i.maintenance {
+            Some(m) => json!({"upcomingMaintenance": m}),
+            None => json!({}),
+        },
     })
 }
 
 /// One simulation tick (each instance list advances the boot/delete states).
 fn tick(account: &mut Account) {
-    account.instances.retain(|i| i.status != "TERMINATED");
+    // `TERMINATED` here models a finished delete (gone); a preempted spot VM
+    // is also `TERMINATED` (stopped) but stays listed, as on Compute Engine.
+    account
+        .instances
+        .retain(|i| i.status != "TERMINATED" || i.preempted);
     for i in account.instances.iter_mut() {
         match i.status {
             _ if i.boot_lists == u32::MAX => {}
@@ -210,7 +238,9 @@ fn tick(account: &mut Account) {
             _ => {}
         }
     }
-    account.instances.retain(|i| i.status != "TERMINATED");
+    account
+        .instances
+        .retain(|i| i.status != "TERMINATED" || i.preempted);
 }
 
 fn machine_type_json(zone: &str, name: &str) -> Value {
@@ -247,6 +277,35 @@ fn aggregated(collection: &str, zones_with: &[&str], item: impl Fn(&str) -> Valu
         items.insert(format!("zones/{zone}"), scope);
     }
     json!({"kind": format!("compute#{collection}AggregatedList"), "items": items})
+}
+
+impl GcpStub {
+    /// Preempt every spot VM: Compute Engine stops it (`TERMINATED`) and it
+    /// stays listed with its `lastStopTimestamp`.
+    pub fn preempt_all(&self) {
+        for instance in self.server.state().instances.iter_mut() {
+            if instance.spot {
+                instance.status = "TERMINATED";
+                instance.preempted = true;
+                instance.last_stop = Some("2026-10-19T03:04:05.000-07:00");
+            }
+        }
+    }
+
+    /// Schedule host maintenance on every instance
+    /// (`resourceStatus.upcomingMaintenance`, `UpcomingMaintenance` schema).
+    pub fn schedule_maintenance(&self) {
+        for instance in self.server.state().instances.iter_mut() {
+            instance.maintenance = Some(json!({
+                "type": "UNSCHEDULED",
+                "maintenanceStatus": "PENDING",
+                "canReschedule": false,
+                "windowStartTime": "2026-10-20T00:00:00.000-07:00",
+                "windowEndTime": "2026-10-20T04:00:00.000-07:00",
+                "maintenanceReasons": ["FAILURE_GPU"],
+            }));
+        }
+    }
 }
 
 #[async_trait]
@@ -539,6 +598,10 @@ impl VendorStub for GcpStub {
                         status: "PROVISIONING",
                         boot_lists: if account.hold_boot { u32::MAX } else { 0 },
                         nat_ip: format!("34.122.0.{id}"),
+                        spot: spec["scheduling"]["provisioningModel"] == "SPOT",
+                        preempted: false,
+                        last_stop: None,
+                        maintenance: None,
                     });
                     // `metadata.items[key=user-data]` — run by cloud-init.
                     if let Some(user_data) =
@@ -633,6 +696,7 @@ impl VendorStub for GcpStub {
                     };
                     instance.status = "STOPPING";
                     instance.boot_lists = 0;
+                    instance.preempted = false;
                     let target = link(&format!("zones/{zone}/instances/{name}"));
                     let op =
                         new_operation(account, &format!("zones/{zone}"), "delete", target, None);
@@ -691,6 +755,10 @@ impl VendorStub for GcpStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        self.server.state().instances.clear();
+    }
+
     fn boot_payloads(&self) -> Vec<String> {
         self.server.state().boot_payloads.clone()
     }
@@ -701,3 +769,98 @@ impl VendorStub for GcpStub {
 }
 
 vendor_suite!(GcpStub);
+
+/// `gpuprov health` reads Compute Engine's own signals: a spot VM is noted,
+/// upcoming maintenance degrades it, and a preemption makes it unhealthy.
+#[tokio::test]
+async fn health_reads_spot_preemption_and_maintenance() {
+    use super::harness::Run;
+    use gpu_provisioner::machine::Cancel;
+    use gpu_provisioner::vm::health::{self, HealthOptions, Verdict};
+    use gpu_provisioner::vm::launch::LaunchState;
+    use gpu_provisioner::vm::teardown::TeardownState;
+
+    let stub = GcpStub::start().await;
+    let mut run = Run::new(&stub, "stub-diag").await;
+    run.spec.spot = true;
+    let end = run.launch(Cancel::new()).await;
+    assert!(
+        matches!(end, LaunchState::Ready(_)),
+        "{end:?}\n{}",
+        run.journal()
+    );
+    let record = run.db.get(&run.name).unwrap().unwrap();
+    let check = || {
+        health::check(
+            Some(&*run.provider),
+            &record,
+            &probes::Reachable,
+            HealthOptions::default(),
+        )
+    };
+    let has = |report: &health::HealthReport, text: &str| {
+        report.checks.iter().any(|c| c.detail.contains(text))
+    };
+
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Healthy, "{report:#?}");
+    assert!(
+        has(&report, "spot VM (Compute Engine may preempt it)"),
+        "{report:#?}"
+    );
+
+    stub.schedule_maintenance();
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Degraded, "{report:#?}");
+    assert!(
+        has(&report, "UNSCHEDULED maintenance pending") && has(&report, "FAILURE_GPU"),
+        "{report:#?}"
+    );
+
+    stub.preempt_all();
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Unhealthy, "{report:#?}");
+    assert!(
+        has(
+            &report,
+            "preempted by Compute Engine at 2026-10-19T03:04:05.000-07:00"
+        ),
+        "{report:#?}"
+    );
+
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
+}
+
+/// Probes that always succeed: the stub has no real host behind its IPs.
+mod probes {
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use gpu_provisioner::provider::SshEndpoint;
+    use gpu_provisioner::vm::health::HealthProbes;
+
+    pub struct Reachable;
+
+    #[async_trait]
+    impl HealthProbes for Reachable {
+        async fn ping(&self, _: &str) -> bool {
+            true
+        }
+        async fn tcp(&self, _: &str, _: u16) -> bool {
+            true
+        }
+        async fn ssh(&self, _: &SshEndpoint, _: &str, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        async fn exec(
+            &self,
+            _: &SshEndpoint,
+            _: &str,
+            _: &Path,
+            _: &str,
+        ) -> Result<(bool, String), String> {
+            Ok((true, String::new()))
+        }
+    }
+}

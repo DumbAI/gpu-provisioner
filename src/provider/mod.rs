@@ -9,6 +9,7 @@
 //! `doc/STATE_MACHINE_DESIGN.md` §4.1 for the per-primitive contract.
 
 pub mod aws;
+pub mod digitalocean;
 pub mod docker;
 #[cfg(test)]
 pub mod fake;
@@ -42,6 +43,7 @@ pub const PROVIDER_IDS: &[&str] = &[
     massedcompute::PROVIDER_ID,
     hyperstack::PROVIDER_ID,
     lambda::PROVIDER_ID,
+    digitalocean::PROVIDER_ID,
     docker::PROVIDER_ID,
 ];
 
@@ -66,6 +68,9 @@ pub async fn build(
             &config.hyperstack,
         )?)),
         lambda::PROVIDER_ID => Ok(Box::new(lambda::LambdaProvider::new(&config.lambda)?)),
+        digitalocean::PROVIDER_ID => Ok(Box::new(digitalocean::DigitalOceanProvider::new(
+            &config.digitalocean,
+        )?)),
         docker::PROVIDER_ID => Ok(Box::new(docker::DockerProvider::new(&config.docker))),
         other => Err(ProviderError::invalid(format!(
             "unknown cloud provider '{other}' (available: {})",
@@ -315,6 +320,74 @@ impl Observed {
 }
 
 // ---------------------------------------------------------------------------
+// Diagnosis (vendor-side health)
+// ---------------------------------------------------------------------------
+
+/// How serious a vendor health finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// Context only (e.g. "spot instance").
+    Info,
+    /// Usable now, but at risk (scheduled retirement, degraded host, …).
+    Warn,
+    /// The vendor considers the instance broken or reclaimed.
+    Critical,
+}
+
+/// One vendor-native health signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub severity: Severity,
+    pub message: String,
+}
+
+impl Finding {
+    pub fn info(message: impl Into<String>) -> Self {
+        Finding {
+            severity: Severity::Info,
+            message: message.into(),
+        }
+    }
+    pub fn warn(message: impl Into<String>) -> Self {
+        Finding {
+            severity: Severity::Warn,
+            message: message.into(),
+        }
+    }
+    pub fn critical(message: impl Into<String>) -> Self {
+        Finding {
+            severity: Severity::Critical,
+            message: message.into(),
+        }
+    }
+}
+
+/// The vendor's view of one VM's health: the instance as observed (or
+/// `None` when the vendor no longer has it — terminated or reclaimed) plus
+/// any vendor-native findings (status checks, maintenance and preemption
+/// events, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnosis {
+    pub instance: Option<Observed>,
+    pub findings: Vec<Finding>,
+}
+
+/// The recorded instance if the vendor still lists it, else a running
+/// replacement carrying the VM's identity, else whatever is there.
+pub fn pick_instance(observed: Vec<Observed>, recorded: Option<&str>) -> Option<Observed> {
+    let index = recorded
+        .and_then(|id| observed.iter().position(|o| o.instance_id == id))
+        .or_else(|| {
+            observed
+                .iter()
+                .position(|o| o.status == InstanceStatus::Running)
+        })
+        .or(if observed.is_empty() { None } else { Some(0) });
+    index.map(|i| observed.into_iter().nth(i).expect("index in range"))
+}
+
+// ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------
 
@@ -553,6 +626,23 @@ pub trait CloudProvider: Send + Sync {
 
     /// Remove per-VM side resources once instances are gone (idempotent).
     async fn cleanup(&self, at: &Location, vm_name: &str) -> Result<(), ProviderError>;
+
+    /// Vendor-side health of a VM (`instance_id` = the recorded instance,
+    /// when known). The default derives it from [`CloudProvider::observe`];
+    /// override it to add vendor-native signals (status checks, scheduled
+    /// maintenance, preemption notices, …) as [`Finding`]s. Read-only.
+    async fn diagnose(
+        &self,
+        at: &Location,
+        vm_name: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Diagnosis, ProviderError> {
+        let observed = self.observe(at, vm_name).await?;
+        Ok(Diagnosis {
+            instance: pick_instance(observed, instance_id),
+            findings: Vec::new(),
+        })
+    }
 }
 
 /// Cross a provider's resolved instance-type ladder (cheapest first) with the

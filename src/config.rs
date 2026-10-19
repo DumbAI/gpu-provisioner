@@ -30,6 +30,10 @@
 //! api_key = "..."               # else $HYPERSTACK_API_KEY
 //! # regions = ["CANADA-1"]      # default: North American regions
 //!
+//! [digitalocean]
+//! api_key = "..."               # else $DIGITALOCEAN_ACCESS_TOKEN
+//! # regions = ["tor1"]          # default: North American regions
+//!
 //! [lambda]
 //! api_key = "..."               # else $LAMBDA_API_KEY
 //!
@@ -71,6 +75,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub lambda: ApiKeyConfig,
     #[serde(default)]
+    pub digitalocean: ApiKeyConfig,
+    #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
     pub defaults: Defaults,
@@ -89,6 +95,7 @@ impl AppConfig {
             "massedcompute" => &self.massedcompute.regions,
             "hyperstack" => &self.hyperstack.regions,
             "lambda" => &self.lambda.regions,
+            "digitalocean" => &self.digitalocean.regions,
             "docker" => &self.docker.regions,
             _ => &self.defaults.regions,
         }
@@ -175,7 +182,7 @@ pub struct VerdaConfig {
 }
 
 /// A cloud authenticated by a single API key (Massed Compute, Hyperstack,
-/// Lambda). Each adapter documents its key's environment-variable fallback.
+/// Lambda, DigitalOcean). Each adapter documents its key's environment-variable fallback.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiKeyConfig {

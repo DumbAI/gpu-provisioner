@@ -1,6 +1,6 @@
 site_name: gpuprov
 site_description: >-
-  Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover,
+  Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover,
   durable state machines, SSH, and single-node k3s clusters.
 site_url: https://dumbai.github.io/gpu-provisioner/
 repo_url: https://github.com/DumbAI/gpu-provisioner
@@ -52,6 +52,7 @@ nav:
       - CLI reference: guides/cli.md
       - Configuration: guides/configuration.md
       - Kubernetes (k3s): guides/kubernetes.md
+      - Health checks: guides/health.md
   - Clouds:
       - Overview: clouds/index.md
       - AWS: clouds/aws.md
@@ -59,6 +60,7 @@ nav:
       - Massed Compute: clouds/massedcompute.md
       - Hyperstack: clouds/hyperstack.md
       - Lambda: clouds/lambda.md
+      - DigitalOcean: clouds/digitalocean.md
       - Prime Intellect: clouds/primeintellect.md
       - RunPod: clouds/runpod.md
       - Verda: clouds/verda.md

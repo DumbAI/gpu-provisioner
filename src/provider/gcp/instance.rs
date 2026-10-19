@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use crate::provider::{InstanceSpec, InstanceStatus, Observed, SshEndpoint};
+use crate::provider::{Finding, InstanceSpec, InstanceStatus, Observed, SshEndpoint};
 use crate::userdata;
 
 use super::api::Instance;
@@ -143,6 +143,76 @@ pub fn status(gcp_status: &str) -> InstanceStatus {
     }
 }
 
+/// Compute Engine-native health signals for one instance, read from the
+/// Instance resource (`scheduling`, `statusMessage`, `lastStopTimestamp`,
+/// `resourceStatus.upcomingMaintenance`, `resourceStatus.shutdownDetails`;
+/// <https://cloud.google.com/compute/docs/reference/rest/v1/instances>). Pure.
+pub fn findings(instance: &Instance) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let spot = instance.scheduling.preemptible
+        || instance.scheduling.provisioning_model.as_deref() == Some("SPOT");
+    // GCP's TERMINATED is "stopped": for a spot/preemptible VM that is a
+    // preemption (on-demand VMs only stop on request or host failure).
+    if spot && instance.status == "TERMINATED" {
+        let when = instance
+            .last_stop_timestamp
+            .as_deref()
+            .map(|t| format!(" at {t}"))
+            .unwrap_or_default();
+        findings.push(Finding::critical(format!(
+            "preempted by Compute Engine{when}"
+        )));
+    } else if spot {
+        findings.push(Finding::info("spot VM (Compute Engine may preempt it)"));
+    }
+    if let Some(stop) = &instance.resource_status.shutdown_details {
+        if let Some(state) = &stop.stop_state {
+            let target = stop
+                .target_state
+                .as_deref()
+                .map(|t| format!(", target {t}"))
+                .unwrap_or_default();
+            let since = stop
+                .request_timestamp
+                .as_deref()
+                .map(|t| format!(" since {t}"))
+                .unwrap_or_default();
+            findings.push(Finding::warn(format!(
+                "shutdown in progress ({state}{target}){since}"
+            )));
+        }
+    }
+    if let Some(maintenance) = &instance.resource_status.upcoming_maintenance {
+        let kind = maintenance.kind.as_deref().unwrap_or("maintenance");
+        let status = maintenance
+            .maintenance_status
+            .as_deref()
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| "pending".into());
+        let window = match (&maintenance.window_start_time, &maintenance.window_end_time) {
+            (Some(start), Some(end)) => format!(" {start} – {end}"),
+            (Some(start), None) => format!(" from {start}"),
+            _ => String::new(),
+        };
+        let reasons = if maintenance.maintenance_reasons.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", maintenance.maintenance_reasons.join(", "))
+        };
+        findings.push(Finding::warn(format!(
+            "{kind} maintenance {status}{window}{reasons}"
+        )));
+    }
+    if let Some(message) = instance
+        .status_message
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+    {
+        findings.push(Finding::info(format!("Compute Engine: {message}")));
+    }
+    findings
+}
+
 pub fn to_observed(instance: &Instance) -> Observed {
     let nic = instance.network_interfaces.first();
     let nat_ip = nic
@@ -164,6 +234,8 @@ pub fn to_observed(instance: &Instance) -> Observed {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::super::catalog::Accelerator;
     use super::*;
 
@@ -285,5 +357,69 @@ mod tests {
     #[test]
     fn label_filter_quotes_the_name() {
         assert_eq!(label_filter("dev"), "labels.gpuprov-vm-name = \"dev\"");
+    }
+
+    fn gcp_instance(value: serde_json::Value) -> Instance {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn spot_preemption_and_spot_running_findings() {
+        let preempted = findings(&gcp_instance(json!({
+            "name": "gpuprov-dev", "status": "TERMINATED",
+            "scheduling": {"provisioningModel": "SPOT"},
+            "lastStopTimestamp": "2026-10-19T01:02:03Z"
+        })));
+        assert_eq!(preempted.len(), 1);
+        assert_eq!(preempted[0].severity, crate::provider::Severity::Critical);
+        assert_eq!(
+            preempted[0].message,
+            "preempted by Compute Engine at 2026-10-19T01:02:03Z"
+        );
+
+        let running = findings(&gcp_instance(json!({
+            "name": "gpuprov-dev", "status": "RUNNING", "scheduling": {"preemptible": true}
+        })));
+        assert_eq!(running[0].severity, crate::provider::Severity::Info);
+        assert!(running[0].message.contains("may preempt"));
+
+        // An on-demand VM that stopped is not a preemption.
+        let stopped = findings(&gcp_instance(json!({
+            "name": "gpuprov-dev", "status": "TERMINATED",
+            "scheduling": {"provisioningModel": "STANDARD"}
+        })));
+        assert!(stopped.is_empty(), "{stopped:?}");
+    }
+
+    #[test]
+    fn maintenance_shutdown_and_status_message_findings() {
+        let found = findings(&gcp_instance(json!({
+            "name": "gpuprov-dev", "status": "RUNNING",
+            "statusMessage": "Instance is healthy",
+            "resourceStatus": {
+                "upcomingMaintenance": {
+                    "type": "UNSCHEDULED", "maintenanceStatus": "PENDING",
+                    "windowStartTime": "2026-10-20T00:00:00Z",
+                    "windowEndTime": "2026-10-20T04:00:00Z",
+                    "maintenanceReasons": ["FAILURE_GPU"]
+                },
+                "shutdownDetails": {
+                    "stopState": "PENDING_STOP", "targetState": "STOPPED",
+                    "requestTimestamp": "2026-10-19T05:00:00Z"
+                }
+            }
+        })));
+        let messages: Vec<&str> = found.iter().map(|f| f.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "shutdown in progress (PENDING_STOP, target STOPPED) since 2026-10-19T05:00:00Z",
+                "UNSCHEDULED maintenance pending 2026-10-20T00:00:00Z – 2026-10-20T04:00:00Z (FAILURE_GPU)",
+                "Compute Engine: Instance is healthy",
+            ]
+        );
+        assert_eq!(found[0].severity, crate::provider::Severity::Warn);
+        assert_eq!(found[1].severity, crate::provider::Severity::Warn);
+        assert_eq!(found[2].severity, crate::provider::Severity::Info);
     }
 }

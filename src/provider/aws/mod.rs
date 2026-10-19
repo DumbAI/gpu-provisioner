@@ -5,6 +5,7 @@
 pub mod ami;
 pub mod bootstrap;
 pub mod catalog;
+pub mod diagnose;
 pub mod error;
 pub mod instance;
 pub mod instance_type;
@@ -18,7 +19,7 @@ use aws_sdk_ec2::types::Filter;
 
 use crate::config::AwsConfig;
 use crate::provider::{
-    Capabilities, CloudProvider, InstanceSpec, Location, Observed, Offer, ProviderError,
+    Capabilities, CloudProvider, Diagnosis, InstanceSpec, Location, Observed, Offer, ProviderError,
     ResourceRequest,
 };
 
@@ -173,5 +174,16 @@ impl CloudProvider for AwsProvider {
 
     async fn cleanup(&self, at: &Location, vm_name: &str) -> Result<(), ProviderError> {
         instance::delete_security_group(&self.clients(&at.region).ec2, &at.region, vm_name).await
+    }
+
+    /// EC2-native diagnosis: state reasons, status checks, scheduled events
+    /// (see `diagnose`).
+    async fn diagnose(
+        &self,
+        at: &Location,
+        vm_name: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Diagnosis, ProviderError> {
+        diagnose::diagnose(&self.clients(&at.region).ec2, vm_name, instance_id).await
     }
 }

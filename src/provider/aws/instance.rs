@@ -163,7 +163,7 @@ pub async fn observe(
     Ok(observed)
 }
 
-fn to_observed(instance: &Instance) -> Option<Observed> {
+pub(super) fn to_observed(instance: &Instance) -> Option<Observed> {
     let status = match instance.state().and_then(|s| s.name())? {
         InstanceStateName::Pending => InstanceStatus::Pending,
         InstanceStateName::Running => InstanceStatus::Running,

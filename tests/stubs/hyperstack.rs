@@ -565,6 +565,10 @@ impl VendorStub for HyperstackStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        self.server.state().vms.clear();
+    }
+
     fn boot_payloads(&self) -> Vec<String> {
         self.server.state().boot_payloads.clone()
     }

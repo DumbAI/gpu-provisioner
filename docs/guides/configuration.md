@@ -51,6 +51,11 @@ api_key = "..."                # else $HYPERSTACK_API_KEY
 api_key = "..."                # else $LAMBDA_API_KEY
 # regions = ["us-east-1"]      # default: US regions
 
+[digitalocean]
+api_key = "..."                # else $DIGITALOCEAN_ACCESS_TOKEN (doctl's variable)
+# regions = ["tor1"]           # default: North American regions
+# regions = ["us-east-1"]      # default: US regions
+
 [verda]
 client_id = "..."              # else $VERDA_CLIENT_ID
 client_secret = "..."          # else $VERDA_CLIENT_SECRET
@@ -88,5 +93,6 @@ marketplace".
 | Massed Compute | `[massedcompute] api_key`, then `$MASSED_COMPUTE_API_KEY` (create at vm.massedcompute.com → Settings → API) |
 | Hyperstack | `[hyperstack] api_key`, then `$HYPERSTACK_API_KEY` |
 | Lambda | `[lambda] api_key`, then `$LAMBDA_API_KEY` |
+| DigitalOcean | `[digitalocean] api_key`, then `$DIGITALOCEAN_ACCESS_TOKEN`, then `$DIGITALOCEAN_TOKEN` |
 | Verda | `[verda] client_id`/`client_secret`, then `$VERDA_CLIENT_ID`/`$VERDA_CLIENT_SECRET` (exchanged for an OAuth token, refreshed automatically) |
 | Docker | the local Docker daemon (`docker info` must work) |

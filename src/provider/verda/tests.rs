@@ -41,6 +41,51 @@ fn instance(value: serde_json::Value) -> Instance {
 }
 
 #[test]
+fn verda_statuses_become_findings() {
+    let critical = crate::provider::Severity::Critical;
+    for (status, text) in [
+        ("discontinued", "discontinued by Verda"),
+        ("notfound", "not found"),
+        ("error", "status 'error'"),
+        ("installation_failed", "status 'installation_failed'"),
+        ("no_capacity", "no capacity"),
+    ] {
+        let found = findings_for(&instance(json!({"id": "i1", "status": status})));
+        assert_eq!(found.len(), 1, "{status}");
+        assert_eq!(found[0].severity, critical, "{status}");
+        assert!(found[0].message.contains(text), "{status}: {found:?}");
+    }
+    let spot = findings_for(&instance(
+        json!({"id": "i1", "status": "running", "is_spot": true}),
+    ));
+    assert_eq!(spot[0].severity, crate::provider::Severity::Info);
+    assert!(findings_for(&instance(json!({"id": "i1", "status": "running"}))).is_empty());
+}
+
+#[test]
+fn a_discontinued_recorded_instance_is_gone_with_the_reason() {
+    let instances = [instance(
+        json!({"id": "i1", "status": "discontinued", "is_spot": true}),
+    )];
+    let diagnosis = diagnosis_from(&instances, Some("i1"));
+    assert!(diagnosis.instance.is_none());
+    assert!(diagnosis.findings[0].message.contains("discontinued"));
+
+    // Without a recorded id the evicted instance still explains the absence.
+    let diagnosis = diagnosis_from(&instances, None);
+    assert!(diagnosis.instance.is_none());
+    assert_eq!(diagnosis.findings.len(), 1);
+
+    // A running instance is picked, with its spot note.
+    let running = [instance(
+        json!({"id": "i2", "status": "running", "ip": "1.2.3.4", "is_spot": true}),
+    )];
+    let diagnosis = diagnosis_from(&running, Some("i2"));
+    assert_eq!(diagnosis.instance.unwrap().instance_id, "i2");
+    assert!(diagnosis.findings[0].message.contains("spot"));
+}
+
+#[test]
 fn instance_status_and_endpoint_mapping() {
     let running = instance(json!({"id": "i1", "status": "running", "ip": "1.2.3.4"}));
     let o = to_observed(&running).unwrap();

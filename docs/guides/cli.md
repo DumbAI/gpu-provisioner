@@ -17,8 +17,8 @@ resumed.
 |---|---|
 | `--name <NAME>` | VM name: lowercase letters, digits and `-`, up to 40 characters. It also works as `name:` in the spec file. |
 | `--spec <FILE>` | YAML spec file. Flags override its fields. |
-| `--cloud <ID>` | `aws` (default), `gcp`, `massedcompute`, `hyperstack`, `lambda`, `verda`, `primeintellect`, `runpod`, or `docker`. |
-| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, `"NVIDIA H100 80GB HBM3"` (RunPod), `1H100.80S.22V` (Verda), `gpu_1x_a6000` (Lambda), `n3-RTX-A6000x1` (Hyperstack), or `container`. Cannot be combined with `--gpus`. |
+| `--cloud <ID>` | `aws` (default), `gcp`, `massedcompute`, `hyperstack`, `lambda`, `digitalocean`, `verda`, `primeintellect`, `runpod`, or `docker`. |
+| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, `"NVIDIA H100 80GB HBM3"` (RunPod), `1H100.80S.22V` (Verda), `gpu_1x_a6000` (Lambda), `gpu-6000adax1-48gb` (DigitalOcean), `n3-RTX-A6000x1` (Hyperstack), or `container`. Cannot be combined with `--gpus`. |
 | `--gpus <NAME[:N]>` | GPU shorthand resolved by the cloud's catalog, e.g. `T4:1`, `L4:1`, `A100-80GB:8`, `H100:8`. |
 | `--region <R>` | Candidate region, in failover order. Repeatable. Region names are cloud-specific. |
 | `--zone <Z>` | Pin to one zone (AWS and GCP) or data center (Prime Intellect, RunPod). |
@@ -57,6 +57,23 @@ endpoint (`host:port` when the port isn't 22).
 
 States: `PROVISIONING`, `UP`, `FAILED`, `TERMINATED`, and `LEAKED`. `LEAKED`
 means teardown could not be confirmed. Run `down` again.
+
+## `gpuprov health [TARGET...]`
+
+Checks whether VMs are still running and usable, or were stopped, preempted, or
+reclaimed by the vendor. It asks the vendor first, then probes ping, TCP, and SSH,
+and falls back to those probes alone when the vendor API is unavailable.
+`TARGET` is a VM name, instance id, or IP; with none, it checks every live VM.
+An IP gpuprov has no record of gets network probes only.
+
+| Flag | Meaning |
+|---|---|
+| `--deep` | also `nvidia-smi -L` and, for k3s VMs, the cluster's health |
+| `--json` | print the reports as JSON |
+| `--port <P>` | port to probe for unrecorded addresses (default 22) |
+
+Exit code: 0 healthy, 1 degraded, 2 unhealthy/gone, 3 unknown. See
+[Health checks](health.md).
 
 ## `gpuprov status <NAME>`
 

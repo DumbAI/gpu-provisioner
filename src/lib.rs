@@ -1,6 +1,6 @@
 //! gpuprov — provision GPU VMs across clouds (AWS, GCP,
 //! Prime Intellect, RunPod, Verda, Massed Compute, Hyperstack,
-//! Lambda, and a local Docker test cloud) with failover, SSH into
+//! Lambda, DigitalOcean, and a local Docker test cloud) with failover, SSH into
 //! them, and optionally turn them into single-node k3s clusters.
 //!
 //! Layering (ports-and-adapters, each layer calls only the one below):
@@ -11,7 +11,7 @@
 //! vm::teardown ── TeardownMachine: delete → await gone → cleanup (also launch compensation)
 //!   machine    ── Executor: journal, retry budgets, polling, cancellation, resume, lease
 //!     provider ── CloudProvider trait: plan / prepare / create / observe / delete / cleanup
-//!       provider::{aws, gcp, massedcompute, hyperstack, lambda, verda, primeintellect, runpod, docker} ── the only code that talks to a cloud
+//!       provider::{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, verda, primeintellect, runpod, docker} ── the only code that talks to a cloud
 //! ```
 //!
 //! Supporting subsystems: `ssh` (keys, probe, runner, ssh-config), `db` (local

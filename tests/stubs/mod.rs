@@ -6,6 +6,7 @@ pub mod harness;
 #[allow(dead_code)]
 pub mod route;
 
+mod digitalocean;
 mod gcp;
 mod hyperstack;
 mod lambda;

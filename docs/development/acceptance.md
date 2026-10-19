@@ -59,6 +59,7 @@ supported and the default provider ordering.
 | Massed Compute | — | — | pending | pending | pending | pending | |
 | Hyperstack (CANADA-1) | — | — | pending | pending | pending | pending | |
 | Lambda | — | — | pending | pending | pending | pending | |
+| DigitalOcean | — | — | pending | pending | pending | pending | |
 | Verda | — | — | pending | pending | pending | pending | |
 | RunPod | — | — | pending | pending | n/a | pending | |
 | Prime Intellect | — | — | pending | pending | pending | pending | |

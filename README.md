@@ -4,8 +4,8 @@
 [![Integration tests](https://github.com/DumbAI/gpu-provisioner/actions/workflows/integration.yml/badge.svg)](https://github.com/DumbAI/gpu-provisioner/actions/workflows/integration.yml)
 
 GPU machines with Kubernetes on them, from one command. `gpuprov` provisions a GPU
-VM on **AWS**, **GCP**, **Massed Compute**, **Hyperstack**, **Lambda**, **Verda**,
-**Prime Intellect**, or **RunPod**, failing over across offers,
+VM on **AWS**, **GCP**, **Massed Compute**, **Hyperstack**, **Lambda**, **DigitalOcean**,
+**Verda**, **Prime Intellect**, or **RunPod**, failing over across offers,
 regions, and zones until one has capacity. It turns the VM into a validated
 single-node **k3s** cluster (on by default; `--no-k8s` for a plain VM), waits
 until SSH and the cluster are healthy, and records everything locally.
@@ -21,6 +21,7 @@ Kubernetes cluster 'gpuprov-dev' is ready.
 
 $ gpuprov ssh dev -- nvidia-smi
 $ gpuprov status dev       # journaled state transitions, incl. why offers were skipped
+$ gpuprov health dev       # still running, or stopped/reclaimed by the vendor?
 $ gpuprov down dev
 ```
 
@@ -98,7 +99,7 @@ cluster::k3s   K3sMachine      Vm(child) → CheckingBootInstall → [Installing
 vm::launch     LaunchMachine   Reconciling → Planning → [Preparing → Creating → Booting → Connecting]* → Ready
 vm::teardown   TeardownMachine Requesting → AwaitingGone → CleaningUp → Done | Leaked
 machine        Executor        journal · retry budgets · polling · cancellation · resume · lease
-provider       CloudProvider   aws · gcp · massedcompute · hyperstack · lambda · verda · primeintellect · runpod · docker
+provider       CloudProvider   aws · gcp · massedcompute · hyperstack · lambda · digitalocean · verda · primeintellect · runpod · docker
 ```
 
 The [state-machine design notes](docs/architecture/state-machines.md) explain each

@@ -20,6 +20,10 @@
 //! | `PUT /v1/instances` (`action: delete`) | [Perform action on instances](https://api.verda.com/v1/docs#tag/instances/PUT/v1/instances) | `202` + per-instance results; `volume_ids` + `delete_permanently` delete those volumes for good, others detach |
 //! | `GET /v1/volumes`, `DELETE /v1/volumes/{id}` | [Get all volumes](https://api.verda.com/v1/docs#tag/volumes/GET/v1/volumes), [Delete volume](https://api.verda.com/v1/docs#tag/volumes/DELETE/v1/volumes/{volume_id}) | delete with `{is_permanent: true}` removes it; otherwise it goes to the trash (still a leftover) |
 //!
+//! Health signals: `VerdaStub::discontinue_all` evicts instances the way a
+//! spot reclaim does — they stay listed with status `discontinued` and their
+//! volumes are detached (`GET /v1/instances` status enum, `is_spot`).
+//!
 //! Instances start `provisioning` (no `ip`), become `running` with an IP
 //! after one list, list as `deleting` once after a delete, then are gone.
 //! Login is `root` on port 22.
@@ -53,6 +57,8 @@ struct Instance {
     boot_lists: u32,
     /// A deleted instance has been listed as `deleting` once.
     deletion_listed: bool,
+    /// Deployed with `is_spot: true`.
+    is_spot: bool,
 }
 
 #[derive(Debug)]
@@ -147,7 +153,7 @@ fn instance_json(instance: &Instance) -> Value {
         "tags": tags_json(&instance.tags),
         "location": instance.location,
         "price_per_hour": 0.49,
-        "is_spot": false,
+        "is_spot": instance.is_spot,
         "instance_type": TYPE,
         "image": "ubuntu-24.04-cuda-12.8-open-docker",
         "os_name": "Ubuntu 24.04",
@@ -188,6 +194,21 @@ fn has_tags(tags: &[Tag], filters: &[String]) -> bool {
             .any(|t| t.key == k.to_lowercase() && t.value == v),
         None => tags.iter().any(|t| t.key == f.to_lowercase()),
     })
+}
+
+impl VerdaStub {
+    /// Evict every instance as a spot reclaim does: listed as
+    /// `discontinued`, volumes detached.
+    pub fn discontinue_all(&self) {
+        let mut account = self.server.state();
+        for instance in account.instances.iter_mut() {
+            instance.status = "discontinued";
+        }
+        for volume in account.volumes.iter_mut() {
+            volume.status = "detached";
+            volume.instance_id = None;
+        }
+    }
 }
 
 #[async_trait]
@@ -420,6 +441,7 @@ impl VendorStub for VerdaStub {
                     os_volume_id: volume_id,
                     boot_lists: if account.hold_boot { u32::MAX } else { 1 },
                     deletion_listed: false,
+                    is_spot: spec["is_spot"].as_bool().unwrap_or(false),
                 });
                 // The startup script attached to the instance, as Verda
                 // would run it at first boot.
@@ -586,7 +608,8 @@ impl VendorStub for VerdaStub {
         let mut left: Vec<String> = account
             .instances
             .iter()
-            .filter(|i| i.status != "deleting")
+            // `discontinued` instances no longer exist (nor bill) at Verda.
+            .filter(|i| i.status != "deleting" && i.status != "discontinued")
             .map(|i| format!("instance {} ({})", i.id, i.status))
             .collect();
         left.extend(account.volumes.iter().map(|v| {
@@ -611,6 +634,17 @@ impl VendorStub for VerdaStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        // A spot discontinue: the instance is gone and its volumes are
+        // left detached (gpuprov's cleanup sweeps them by tag).
+        let mut account = self.server.state();
+        account.instances.clear();
+        for volume in account.volumes.iter_mut() {
+            volume.status = "detached";
+            volume.instance_id = None;
+        }
+    }
+
     fn boot_payloads(&self) -> Vec<String> {
         self.server.state().boot_payloads.clone()
     }
@@ -621,3 +655,85 @@ impl VendorStub for VerdaStub {
 }
 
 vendor_suite!(VerdaStub);
+
+/// `gpuprov health` reads Verda's own signals: a spot instance is noted, and
+/// an evicted (`discontinued`) instance is reported gone with Verda's reason.
+#[tokio::test]
+async fn health_reads_spot_and_discontinued() {
+    use super::harness::Run;
+    use gpu_provisioner::machine::Cancel;
+    use gpu_provisioner::vm::health::{self, HealthOptions, Verdict};
+    use gpu_provisioner::vm::launch::LaunchState;
+    use gpu_provisioner::vm::teardown::TeardownState;
+
+    let stub = VerdaStub::start().await;
+    let mut run = Run::new(&stub, "stub-diag").await;
+    run.spec.spot = true;
+    let end = run.launch(Cancel::new()).await;
+    assert!(
+        matches!(end, LaunchState::Ready(_)),
+        "{end:?}\n{}",
+        run.journal()
+    );
+    let record = run.db.get(&run.name).unwrap().unwrap();
+    let check = || {
+        health::check(
+            Some(&*run.provider),
+            &record,
+            &probes::Reachable,
+            HealthOptions::default(),
+        )
+    };
+    let has = |report: &health::HealthReport, text: &str| {
+        report.checks.iter().any(|c| c.detail.contains(text))
+    };
+
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Healthy, "{report:#?}");
+    assert!(
+        has(&report, "spot instance (Verda may evict it)"),
+        "{report:#?}"
+    );
+
+    stub.discontinue_all();
+    let report = check().await;
+    assert_eq!(report.verdict, Verdict::Gone, "{report:#?}");
+    assert!(has(&report, "discontinued by Verda"), "{report:#?}");
+
+    // Teardown after an eviction: nothing to delete, detached volumes swept.
+    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
+}
+
+/// Probes that always succeed: the stub has no real host behind its IPs.
+mod probes {
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use gpu_provisioner::provider::SshEndpoint;
+    use gpu_provisioner::vm::health::HealthProbes;
+
+    pub struct Reachable;
+
+    #[async_trait]
+    impl HealthProbes for Reachable {
+        async fn ping(&self, _: &str) -> bool {
+            true
+        }
+        async fn tcp(&self, _: &str, _: u16) -> bool {
+            true
+        }
+        async fn ssh(&self, _: &SshEndpoint, _: &str, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        async fn exec(
+            &self,
+            _: &SshEndpoint,
+            _: &str,
+            _: &Path,
+            _: &str,
+        ) -> Result<(bool, String), String> {
+            Ok((true, String::new()))
+        }
+    }
+}

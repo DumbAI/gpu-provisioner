@@ -42,6 +42,7 @@ gpuprov down demo
     - RunPod: `RUNPOD_API_KEY` (or `runpod config`).
     - Verda: `VERDA_CLIENT_ID` and `VERDA_CLIENT_SECRET` (Cloud API credentials).
     - Massed Compute, Hyperstack, Lambda: `MASSED_COMPUTE_API_KEY`, `HYPERSTACK_API_KEY`, `LAMBDA_API_KEY`.
+    - DigitalOcean: `DIGITALOCEAN_ACCESS_TOKEN` (the same token `doctl` uses).
 
 2. **Provision.**
 

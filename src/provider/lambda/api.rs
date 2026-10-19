@@ -126,6 +126,10 @@ pub struct Instance {
     pub region: Region,
     #[serde(default)]
     pub tags: Vec<Tag>,
+    /// When the instance first became healthy; `null` if it never has
+    /// (`components/schemas/Instance.first_healthy`).
+    #[serde(default)]
+    pub first_healthy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

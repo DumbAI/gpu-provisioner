@@ -53,7 +53,7 @@ main.rs ─ CLI: provision / down / status / ssh / kubeconfig / tunnel / list
     machine/          Executor<M: Machine>: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, gcp, massedcompute, hyperstack, lambda, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 ```
 
 ### 4.1 The provider contract (`provider/mod.rs`)
@@ -83,6 +83,7 @@ Semantics every adapter must honour. These are checked by the shared conformance
 | `observe` | All non-terminated instances carrying the identity at that location, with **normalised** status and the SSH endpoint once known. |
 | `delete` | Request deletion of the given instances. Idempotent: an unknown or already-deleted instance is success. Does not wait. |
 | `cleanup` | Delete per-VM side resources after instances are gone. Idempotent. |
+| `diagnose` (optional) | Vendor-side health for `gpuprov health`: the instance as the vendor sees it (`None` = gone) plus vendor-native findings. The default derives it from `observe`. Read-only. |
 
 Normalised status: `Pending | Running | Stopping | Stopped | Terminating | Failed(reason)`. The core treats an instance as *booted* when it is `Running` **and** reports an `SshEndpoint { host, port, user? }`. That covers the AWS public-IP lag and Prime Intellect's late `sshConnection`.
 
@@ -202,6 +203,7 @@ each one maps onto the primitives:
 | GCP (Compute REST) | static ladder × zones that offer the type (live) | per-VM firewall rule; image family → image | `instances.insert` + wait for the zone operation | `instances.list` by label | `instances.delete` / delete firewall rule | cloud-init |
 | Massed Compute | live `GET /gpu-inventory` | find-or-register SSH key; re-check capacity; pick image | `POST /instance/launch` (region `any`) | `GET /instance` by name | `POST /instance/terminate` / — | — (SSH route) |
 | Hyperstack | live flavors ⨝ `/core/stocks` ⨝ `/pricebook` per region | re-check stock; find-or-create environment + key pair; pick image | `POST /core/virtual-machines` with labels, public IP, security rules | VM list by environment + exact name | `DELETE` VM / — | cloud-init |
+| DigitalOcean | live `GET /v2/sizes` × regions where available | find-or-register SSH key; per-VM cloud firewall (by tag); pick the GPU image; re-check availability | `POST /v2/droplets` with tags + `user_data` | `GET /v2/droplets?tag_name=…` | `DELETE /v2/droplets/{id}` / delete firewall | cloud-init |
 | Lambda | live `GET /instance-types` (capacity per region) | re-check capacity; find-or-register SSH key; per-VM firewall ruleset when ports are needed | `POST /instance-operations/launch` with tags + `user_data` | `GET /instances` by tag | `terminate` / delete ruleset | cloud-init |
 | Verda (REST v1) | instance types × per-location availability (spot or on-demand) | find-or-register SSH key; startup script from the boot script; re-check stock; pick image | `POST /v1/instances` with tags, OS volume, key, startup script | `GET /v1/instances?tag=…` | `delete` incl. volumes / tagged volumes + scripts | startup script |
 | Prime Intellect (REST) | live `GET /availability/gpus`, one offer per data center | find-or-register SSH key → `sshKeyId`; re-validate offer | `POST /pods` with the offer's cloudId/socket/dc + `sshKeyId` | `GET /pods` by name; `sshConnection` → user/port | `DELETE /pods/{id}` / — | — (SSH route) |

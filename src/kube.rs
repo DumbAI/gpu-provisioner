@@ -447,13 +447,18 @@ pub async fn fetch_kubeconfig(
 /// One health snapshot of the cluster, taken on the node. With `tls_san`,
 /// also checks that the API certificate covers that host.
 pub async fn health(node: &Node<'_>, tls_san: Option<&str>) -> Result<Health, KubeError> {
-    let command = format!(
+    let out = capture(node, health_command(tls_san)).await?;
+    Ok(Health::parse(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The remote shell command whose output [`Health::parse`] reads (one SSH
+/// round trip). With `tls_san`, also checks the API certificate covers it.
+pub fn health_command(tls_san: Option<&str>) -> String {
+    format!(
         "sudo GPUPROV_TLS_SAN={} bash -c {}",
         shell_quote(tls_san.unwrap_or("")),
         shell_quote(VALIDATE_SCRIPT)
-    );
-    let out = capture(node, command).await?;
-    Ok(Health::parse(&String::from_utf8_lossy(&out.stdout)))
+    )
 }
 
 /// Whether `host:port` accepts TCP from here — catches a closed firewall

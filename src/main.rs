@@ -22,6 +22,9 @@ use gpu_provisioner::spec::{CliOverrides, VmSpec};
 use gpu_provisioner::ssh::options::SshOptions;
 use gpu_provisioner::ssh::{config_file, keys, runner, wait};
 use gpu_provisioner::util::{self, Paths};
+use gpu_provisioner::vm::health::{
+    self, CheckStatus, HealthOptions, HealthReport, SystemProbes, Target,
+};
 use gpu_provisioner::vm::launch::{LaunchMachine, LaunchState, ReadyVm, SshConnector};
 use gpu_provisioner::vm::teardown::{TeardownMachine, TeardownState};
 
@@ -29,7 +32,7 @@ use gpu_provisioner::vm::teardown::{TeardownMachine, TeardownState};
 #[command(
     name = "gpuprov",
     version,
-    about = "Provision GPU VMs across clouds (AWS, GCP, Lambda, Hyperstack, Massed Compute, Verda, RunPod, Prime Intellect) with failover, durable \
+    about = "Provision GPU VMs across clouds (AWS, GCP, Lambda, Hyperstack, Massed Compute, DigitalOcean, Verda, RunPod, Prime Intellect) with failover, durable \
              state machines and single-node k3s clusters"
 )]
 struct Cli {
@@ -52,6 +55,9 @@ enum Command {
     Ssh(SshArgs),
     /// List VM records from the local database
     List,
+    /// Check whether VMs are still running and usable, or were stopped or
+    /// reclaimed by the vendor (vendor diagnosis, then ping/TCP/SSH)
+    Health(HealthArgs),
     /// Show a VM's record and its recent state-machine transitions
     Status(NameArg),
     /// Fetch/refresh the local kubeconfig for a k3s VM (provisioned with --k8s)
@@ -70,12 +76,13 @@ struct ProvisionArgs {
     /// YAML spec file; flags below override its fields
     #[arg(long, value_name = "FILE")]
     spec: Option<PathBuf>,
-    /// Cloud: aws (default), gcp, massedcompute, hyperstack, lambda, verda,
+    /// Cloud: aws (default), gcp, massedcompute, hyperstack, lambda, digitalocean, verda,
     /// primeintellect, runpod, docker
     #[arg(long)]
     cloud: Option<String>,
     /// Exact instance type, e.g. g5.xlarge (AWS), g2-standard-8 (GCP),
     /// hyperstack/n3-H100x1 (Prime Intellect), "NVIDIA H100 80GB HBM3" (RunPod), 1H100.80S.22V (Verda), gpu_1x_a6000 (Lambda),
+    /// gpu-6000adax1-48gb (DigitalOcean),
     /// container (docker)
     #[arg(long, conflicts_with = "gpus")]
     instance_type: Option<String>,
@@ -125,6 +132,22 @@ struct SshArgs {
 }
 
 #[derive(Args)]
+struct HealthArgs {
+    /// VM names, instance ids or IPs (default: every live VM). An IP gpuprov
+    /// has no record of gets network probes only.
+    targets: Vec<String>,
+    /// Also check the GPUs (`nvidia-smi`) and, for k3s VMs, the cluster
+    #[arg(long)]
+    deep: bool,
+    /// Print the reports as JSON
+    #[arg(long)]
+    json: bool,
+    /// Port to probe for targets without a record
+    #[arg(long, default_value_t = 22)]
+    port: u16,
+}
+
+#[derive(Args)]
 struct NameArg {
     /// VM name (see `gpuprov list`)
     name: String,
@@ -144,6 +167,7 @@ async fn main() -> Result<()> {
         Command::Provision(args) => provision(args, &config, &paths).await,
         Command::Ssh(args) => ssh(args, &paths).await,
         Command::List => list(&paths),
+        Command::Health(args) => health(args, &config, &paths).await,
         Command::Status(args) => status(&args.name, &paths),
         Command::Kubeconfig(args) => kubeconfig(&args.name, &config, &paths).await,
         Command::Tunnel(args) => tunnel(&args.name, &paths),
@@ -507,6 +531,97 @@ fn list(paths: &Paths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Read-only health check of VMs (by name, instance id or IP) or bare
+/// addresses. Exits with the worst verdict's code (0 healthy, 1 degraded,
+/// 2 unhealthy/gone, 3 unknown).
+async fn health(args: HealthArgs, config: &AppConfig, paths: &Paths) -> Result<()> {
+    let db = open_db(paths)?;
+    let targets: Vec<Target> = if args.targets.is_empty() {
+        health::live_records(&db)?
+            .into_iter()
+            .map(|r| Target::Vm(Box::new(r)))
+            .collect()
+    } else {
+        args.targets
+            .iter()
+            .map(|t| health::resolve(&db, t))
+            .collect::<Result<_, _>>()?
+    };
+    if targets.is_empty() {
+        println!("No live VMs to check (see `gpuprov list`).");
+        return Ok(());
+    }
+    let options = HealthOptions { deep: args.deep };
+    // One adapter per cloud; a cloud whose adapter can't be built (e.g.
+    // missing credentials) is checked by the network fallback instead.
+    let mut providers: std::collections::HashMap<String, Option<Box<dyn provider::CloudProvider>>> =
+        std::collections::HashMap::new();
+    let mut reports = Vec::with_capacity(targets.len());
+    for target in targets {
+        let report = match target {
+            Target::Address(address) => {
+                health::check_address(&address, args.port, &SystemProbes).await
+            }
+            Target::Vm(record) => {
+                let cloud = record
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| provider::DEFAULT_PROVIDER.to_string());
+                if !providers.contains_key(&cloud) {
+                    let built = match provider::build(&cloud, config).await {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            tracing::warn!("{cloud}: {e}; using network probes only");
+                            None
+                        }
+                    };
+                    providers.insert(cloud.clone(), built);
+                }
+                let adapter = providers.get(&cloud).and_then(|p| p.as_deref());
+                health::check(adapter, &record, &SystemProbes, options).await
+            }
+        };
+        reports.push(report);
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+    } else {
+        for report in &reports {
+            print_health(report);
+        }
+    }
+    let worst = reports.iter().map(|r| r.verdict).max().unwrap_or_default();
+    std::process::exit(worst.exit_code());
+}
+
+fn print_health(report: &HealthReport) {
+    let place = [
+        report.provider.as_deref(),
+        report.location.as_deref(),
+        report.instance_id.as_deref(),
+        report.endpoint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("  ");
+    println!(
+        "{}  {}  {place}  (judged by {})",
+        report.name, report.verdict, report.source
+    );
+    for check in &report.checks {
+        let mark = match check.status {
+            CheckStatus::Pass => "✓",
+            CheckStatus::Warn => "!",
+            CheckStatus::Fail => "✗",
+            CheckStatus::Skip => "-",
+        };
+        println!("  {mark} {:<8} {}", check.name, check.detail);
+    }
+    println!();
 }
 
 fn status(name: &str, paths: &Paths) -> Result<()> {

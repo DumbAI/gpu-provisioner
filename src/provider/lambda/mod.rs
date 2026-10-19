@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ApiKeyConfig;
 use crate::provider::{
-    Capabilities, CloudProvider, Feature, InstanceSpec, InstanceStatus, Location, Observed, Offer,
-    ProviderError, ResourceRequest, SshEndpoint,
+    pick_instance, Capabilities, CloudProvider, Diagnosis, Feature, Finding, InstanceSpec,
+    InstanceStatus, Location, Observed, Offer, ProviderError, ResourceRequest, SshEndpoint,
 };
 use crate::userdata;
 
@@ -280,6 +280,38 @@ fn to_observed(instance: &Instance) -> Option<Observed> {
     })
 }
 
+/// Lambda-native health signals for one instance, from its `status` and
+/// `first_healthy` (Cloud API `Instance` schema:
+/// <https://docs.lambda.ai/api/cloud#getInstance>). Pure.
+fn findings_for(instance: &Instance) -> Vec<Finding> {
+    match instance.status.as_str() {
+        "unhealthy" => {
+            let history = match &instance.first_healthy {
+                Some(since) => format!(" (was healthy from {since})"),
+                None => " (it never became healthy)".to_string(),
+            };
+            vec![Finding::critical(format!(
+                "Lambda reports the instance unhealthy{history}"
+            ))]
+        }
+        "preempted" => vec![Finding::critical("preempted by Lambda")],
+        _ => Vec::new(),
+    }
+}
+
+/// The VM's diagnosis from its raw instances: the default instance choice
+/// plus Lambda's own findings for the chosen instance. Pure.
+fn diagnosis_from(instances: &[Instance], recorded: Option<&str>) -> Diagnosis {
+    let observed: Vec<Observed> = instances.iter().filter_map(to_observed).collect();
+    let instance = pick_instance(observed, recorded);
+    let findings = instance
+        .as_ref()
+        .and_then(|o| instances.iter().find(|i| i.id == o.instance_id))
+        .map(findings_for)
+        .unwrap_or_default();
+    Diagnosis { instance, findings }
+}
+
 fn offer_detail(offer: &Offer) -> Result<OfferDetail, ProviderError> {
     serde_json::from_value(offer.detail.clone())
         .map_err(|e| ProviderError::invalid(format!("offer {offer} is not a Lambda offer: {e}")))
@@ -390,6 +422,18 @@ impl CloudProvider for LambdaProvider {
             .collect();
         observed.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
         Ok(observed)
+    }
+
+    /// Adds Lambda's `unhealthy` / `preempted` statuses as findings (the
+    /// normalized status alone reads `unhealthy` as still booting).
+    async fn diagnose(
+        &self,
+        _at: &Location,
+        vm_name: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Diagnosis, ProviderError> {
+        let instances = self.vm_instances(vm_name).await?;
+        Ok(diagnosis_from(&instances, instance_id))
     }
 
     async fn delete(

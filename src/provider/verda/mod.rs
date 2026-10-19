@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::VerdaConfig;
 use crate::provider::{
-    Capabilities, CloudProvider, Feature, InstanceSpec, InstanceStatus, Location, Observed, Offer,
-    ProviderError, ResourceRequest, SshEndpoint,
+    pick_instance, Capabilities, CloudProvider, Diagnosis, Feature, Finding, InstanceSpec,
+    InstanceStatus, Location, Observed, Offer, ProviderError, ResourceRequest, SshEndpoint,
 };
 
 use api::{Api, DeployInstance, Instance, OsVolume, Tag};
@@ -237,6 +237,60 @@ fn to_observed(instance: &Instance) -> Option<Observed> {
     })
 }
 
+/// Verda-native health signals for one listed instance (Verda API v1
+/// `GET /v1/instances`: `status`, `is_spot`; <https://api.verda.com/v1/docs>).
+/// Pure.
+fn findings_for(instance: &Instance) -> Vec<Finding> {
+    match instance.status.as_str() {
+        "discontinued" => vec![Finding::critical(
+            "discontinued by Verda (spot capacity reclaimed or instance retired)",
+        )],
+        "notfound" => vec![Finding::critical("Verda reports the instance not found")],
+        "error" | "installation_failed" => vec![Finding::critical(format!(
+            "Verda reports status '{}'",
+            instance.status
+        ))],
+        "no_capacity" => vec![Finding::critical(
+            "Verda reports no capacity for the instance",
+        )],
+        "running" if instance.is_spot => {
+            vec![Finding::info("spot instance (Verda may evict it)")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The VM's diagnosis from its raw instances. A recorded instance Verda
+/// still lists as `discontinued`/`notfound` is gone, with Verda's reason as
+/// a finding; otherwise the default instance choice plus its findings. Pure.
+fn diagnosis_from(instances: &[Instance], recorded: Option<&str>) -> Diagnosis {
+    let gone_with_reason = |i: &Instance| matches!(i.status.as_str(), "discontinued" | "notfound");
+    if let Some(record) = recorded.and_then(|id| instances.iter().find(|i| i.id == id)) {
+        if gone_with_reason(record) {
+            return Diagnosis {
+                instance: None,
+                findings: findings_for(record),
+            };
+        }
+    }
+    let observed: Vec<Observed> = instances.iter().filter_map(to_observed).collect();
+    let instance = pick_instance(observed, recorded);
+    let findings = match &instance {
+        Some(chosen) => instances
+            .iter()
+            .find(|i| i.id == chosen.instance_id)
+            .map(findings_for)
+            .unwrap_or_default(),
+        // Nothing live: explain with the evicted instance, if one is listed.
+        None => instances
+            .iter()
+            .find(|i| gone_with_reason(i))
+            .map(findings_for)
+            .unwrap_or_default(),
+    };
+    Diagnosis { instance, findings }
+}
+
 fn offer_detail(offer: &Offer) -> Result<OfferDetail, ProviderError> {
     serde_json::from_value(offer.detail.clone())
         .map_err(|e| ProviderError::invalid(format!("offer {offer} is not a Verda offer: {e}")))
@@ -365,6 +419,17 @@ impl CloudProvider for VerdaProvider {
             .collect();
         observed.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
         Ok(observed)
+    }
+
+    /// Adds Verda's eviction (`discontinued`), failure and spot signals.
+    async fn diagnose(
+        &self,
+        _at: &Location,
+        vm_name: &str,
+        instance_id: Option<&str>,
+    ) -> Result<Diagnosis, ProviderError> {
+        let instances = self.tagged_instances(vm_name).await?;
+        Ok(diagnosis_from(&instances, instance_id))
     }
 
     async fn delete(

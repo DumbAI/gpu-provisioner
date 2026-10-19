@@ -346,6 +346,10 @@ impl VendorStub for MassedComputeStub {
         self.server.state().creates
     }
 
+    fn reclaim(&self) {
+        self.server.state().instances.clear();
+    }
+
     fn expected_login(&self) -> (String, u16) {
         (LOGIN_USER.into(), 22)
     }

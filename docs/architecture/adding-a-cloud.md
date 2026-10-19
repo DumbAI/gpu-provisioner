@@ -16,6 +16,8 @@ pub trait CloudProvider: Send + Sync {
     async fn observe(&self, at: &Location, vm_name: &str) -> Result<Vec<Observed>, ProviderError>;
     async fn delete(&self, at: &Location, vm_name: &str, ids: &[String]) -> Result<(), ProviderError>;
     async fn cleanup(&self, at: &Location, vm_name: &str) -> Result<(), ProviderError>;
+    // optional — default derived from `observe`:
+    async fn diagnose(&self, at: &Location, vm_name: &str, instance_id: Option<&str>) -> Result<Diagnosis, ProviderError>;
 }
 ```
 
@@ -34,6 +36,25 @@ Long waits belong to the core, which polls `observe` using your
 `Capabilities { boot_timeout, delete_timeout, poll_interval }`. The one exception
 is a bounded wait on a cloud operation whose *result* carries the error, as with
 GCP's `operations.wait` after `instances.insert`.
+
+## Health diagnosis (optional)
+
+`gpuprov health` asks the adapter for a `Diagnosis`: the instance as the vendor
+sees it (`None` if it no longer exists, which means gone) plus vendor-native
+`Finding`s. The default implementation derives this from `observe`, so a new
+cloud gets health checks for free. If the vendor exposes more, such as status
+checks, scheduled maintenance, preemption reasons, or why an instance was
+terminated, override `diagnose` and return findings:
+
+| Severity | Use for | Verdict effect |
+|---|---|---|
+| `Finding::info` | context ("spot instance") | none |
+| `Finding::warn` | usable but at risk (scheduled retirement, maintenance) | degraded |
+| `Finding::critical` | the vendor considers it broken or reclaimed (failed status check, preempted) | unhealthy |
+
+Keep it read-only. Recently terminated instances are worth listing here, even
+though `observe` hides them, so a reclaim can be attributed ("terminated by the
+vendor: spot capacity reclaimed").
 
 ## Classifying errors
 

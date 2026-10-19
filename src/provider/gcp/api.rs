@@ -119,6 +119,56 @@ pub struct Instance {
     /// Zone URL.
     pub zone: String,
     pub network_interfaces: Vec<NetworkInterface>,
+    /// Human-readable explanation of `status`, when GCP gives one.
+    pub status_message: Option<String>,
+    /// RFC 3339 time of the last stop (e.g. a preemption).
+    pub last_stop_timestamp: Option<String>,
+    pub scheduling: Scheduling,
+    pub resource_status: ResourceStatus,
+}
+
+/// `Instance.scheduling` (Compute Engine v1 `Scheduling`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Scheduling {
+    pub preemptible: bool,
+    /// `SPOT`, `STANDARD`, `FLEX_START`, `RESERVATION_BOUND`.
+    pub provisioning_model: Option<String>,
+}
+
+/// `Instance.resourceStatus` (Compute Engine v1 `ResourceStatus`), the parts
+/// that describe health: upcoming maintenance and an in-progress stop.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResourceStatus {
+    pub upcoming_maintenance: Option<UpcomingMaintenance>,
+    pub shutdown_details: Option<ShutdownDetails>,
+}
+
+/// `ResourceStatus.upcomingMaintenance` (`UpcomingMaintenance`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpcomingMaintenance {
+    /// `SCHEDULED`, `UNSCHEDULED`, `MULTIPLE`, `UNKNOWN_TYPE`.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    /// `PENDING`, `ONGOING`, `UNKNOWN`.
+    pub maintenance_status: Option<String>,
+    pub window_start_time: Option<String>,
+    pub window_end_time: Option<String>,
+    /// e.g. `FAILURE_GPU`, `FAILURE_INFRA`, `SCHEDULED_MAINTENANCE`.
+    pub maintenance_reasons: Vec<String>,
+}
+
+/// `ResourceStatus.shutdownDetails` (`ResourceStatusShutdownDetails`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ShutdownDetails {
+    /// `PENDING_STOP`, `STOPPING`.
+    pub stop_state: Option<String>,
+    /// `DELETED`, `STOPPED`.
+    pub target_state: Option<String>,
+    pub request_timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
