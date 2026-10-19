@@ -35,6 +35,27 @@ api_key = "..."                # else $PRIME_API_KEY, else ~/.prime/config.json
 # team_id = "..."              # bill pods to a team
 # regions = ["united_states"]  # default region filter (empty = anywhere)
 
+[runpod]
+api_key = "..."                # else $RUNPOD_API_KEY, else ~/.runpod/config.toml
+# regions = ["north_america"]  # continents or ISO country codes (empty = anywhere)
+# image = "runpod/pytorch:..." # default: runpod/base with CUDA 12.9
+
+[massedcompute]
+api_key = "..."                # else $MASSED_COMPUTE_API_KEY
+
+[hyperstack]
+api_key = "..."                # else $HYPERSTACK_API_KEY
+# regions = ["CANADA-1"]       # default: CANADA-1, US-1 (Norway only when asked)
+
+[lambda]
+api_key = "..."                # else $LAMBDA_API_KEY
+# regions = ["us-east-1"]      # default: US regions
+
+[verda]
+client_id = "..."              # else $VERDA_CLIENT_ID
+client_secret = "..."          # else $VERDA_CLIENT_SECRET
+# regions = ["FIN-01"]         # location codes or ISO country codes (empty = anywhere)
+
 [docker]
 # image = "my/sshd:tag"        # default: built locally from an embedded Dockerfile
 
@@ -63,4 +84,9 @@ marketplace".
 | AWS | static keys in `[aws]`, then `[aws] profile`, then the default AWS chain (env vars, `~/.aws`, IMDS) |
 | GCP | `[gcp] access_token`, then `$GOOGLE_OAUTH_ACCESS_TOKEN`, then `gcloud auth print-access-token` (cached, refreshed before expiry). Project: `[gcp] project`, then `$GOOGLE_CLOUD_PROJECT`/`$CLOUDSDK_CORE_PROJECT`, then `gcloud config get-value project` |
 | Prime Intellect | `[primeintellect] api_key`, then `$PRIME_API_KEY`, then the prime CLI's `~/.prime/config.json` |
+| RunPod | `[runpod] api_key`, then `$RUNPOD_API_KEY`, then the runpod CLI's `~/.runpod/config.toml` |
+| Massed Compute | `[massedcompute] api_key`, then `$MASSED_COMPUTE_API_KEY` (create at vm.massedcompute.com → Settings → API) |
+| Hyperstack | `[hyperstack] api_key`, then `$HYPERSTACK_API_KEY` |
+| Lambda | `[lambda] api_key`, then `$LAMBDA_API_KEY` |
+| Verda | `[verda] client_id`/`client_secret`, then `$VERDA_CLIENT_ID`/`$VERDA_CLIENT_SECRET` (exchanged for an OAuth token, refreshed automatically) |
 | Docker | the local Docker daemon (`docker info` must work) |

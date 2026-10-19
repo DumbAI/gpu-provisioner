@@ -6,11 +6,12 @@
 //! that boot with cloud-init (AWS, GCP); others take the key via their API
 //! (`InstanceSpec::ssh_public_key`).
 //!
-//! A workload script (the k3s installer) can be appended with
-//! [`with_boot_script`] so it runs during boot; whether it ran is verified
-//! afterwards over SSH by the cluster machine (`cluster::k3s`), which falls
-//! back to pushing the same script over SSH. Clouds without cloud-init only
-//! ever take that SSH route.
+//! [`render`] produces the document a cloud-init cloud should boot with:
+//! the login user, plus the spec's `boot_script` (the k3s installer) as a
+//! file run once by `runcmd`. Clouds without cloud-init deliver the boot
+//! script their own way (`BootScript::to_shell`) or not at all.
+
+use crate::provider::InstanceSpec;
 
 /// Build the `#cloud-config` document. `public_key_openssh` is a single-line
 /// OpenSSH public key (`ssh-ed25519 AAAA...`).
@@ -27,6 +28,25 @@ users:
         user = ssh_user,
         key = public_key_openssh.trim(),
     )
+}
+
+/// Where cloud-init writes the boot script before running it.
+pub const BOOT_SCRIPT_PATH: &str = "/opt/gpuprov/boot.sh";
+
+/// The cloud-init user data for `spec`: its login document, plus its boot
+/// script when one is set.
+pub fn render(spec: &InstanceSpec) -> String {
+    match &spec.boot_script {
+        None => spec.user_data.clone(),
+        Some(boot) => {
+            let env: Vec<(&str, &str)> = boot
+                .env
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            with_boot_script(&spec.user_data, BOOT_SCRIPT_PATH, &boot.script, &env)
+        }
+    }
 }
 
 /// Append a boot script to a document from [`build_cloud_init`]: written to
@@ -91,6 +111,29 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(cmd, ["env", "ORIGIN=boot", "bash", "/opt/x.sh"]);
+    }
+
+    #[test]
+    fn render_adds_the_boot_script_only_when_set() {
+        let mut spec = InstanceSpec {
+            vm_name: "vm1".into(),
+            image_id: None,
+            disk_gb: 100,
+            spot: false,
+            open_ports: Vec::new(),
+            user_data: build_cloud_init("ubuntu", "ssh-ed25519 AAA test"),
+            ssh_public_key: "ssh-ed25519 AAA test".into(),
+            ssh_user: "ubuntu".into(),
+            boot_script: None,
+        };
+        assert_eq!(render(&spec), spec.user_data);
+        spec.boot_script = Some(crate::provider::BootScript {
+            script: "#!/usr/bin/env bash\necho hi\n".into(),
+            env: vec![("K".into(), "V".into())],
+        });
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&render(&spec)).unwrap();
+        assert_eq!(parsed["write_files"][0]["path"], BOOT_SCRIPT_PATH);
+        assert_eq!(parsed["runcmd"][0][1], "K=V");
     }
 
     #[test]

@@ -39,6 +39,9 @@ gpuprov down demo
     - AWS: `aws configure` (or a profile in `~/.gpu-provisioner/config.toml`).
     - GCP: `gcloud auth login` and `gcloud config set project <id>`.
     - Prime Intellect: `prime login`, or `PRIME_API_KEY`.
+    - RunPod: `RUNPOD_API_KEY` (or `runpod config`).
+    - Verda: `VERDA_CLIENT_ID` and `VERDA_CLIENT_SECRET` (Cloud API credentials).
+    - Massed Compute, Hyperstack, Lambda: `MASSED_COMPUTE_API_KEY`, `HYPERSTACK_API_KEY`, `LAMBDA_API_KEY`.
 
 2. **Provision.**
 
@@ -48,6 +51,13 @@ gpuprov down demo
 
     # GCP: an L4 in any zone of us-central1
     gpuprov provision --cloud gcp --name dev-gcp --gpus L4:1 --region us-central1
+
+    # Budget 48 GB GPU for a session: Massed Compute (US) or Hyperstack (Canada)
+    gpuprov provision --cloud massedcompute --name dev-mc --gpus A6000:1
+    gpuprov provision --cloud hyperstack --name dev-hs --gpus A6000:1 --region CANADA-1
+
+    # RunPod: the cheapest in-stock RTX 4090 pod (pods run as containers: no k3s)
+    gpuprov provision --cloud runpod --name dev-rp --gpus RTX4090:1
 
     # Prime Intellect: the cheapest H100 offer anywhere in the marketplace
     gpuprov provision --cloud primeintellect --name dev-pi --gpus H100:1

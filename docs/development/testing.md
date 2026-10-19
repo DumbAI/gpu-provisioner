@@ -6,6 +6,7 @@ cargo test vm::launch            # one module (substring match)
 cargo test quota_blocks_every_type_in_the_region   # one test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo test --test vendor_stubs   # every cloud adapter against a stateful stub of its API
 cargo test --test docker_e2e -- --ignored --nocapture   # end-to-end, needs Docker
 ```
 
@@ -15,7 +16,8 @@ cargo test --test docker_e2e -- --ignored --nocapture   # end-to-end, needs Dock
 |---|---|
 | Executor (`machine/`) | a toy machine: journaling, retry-budget exhaustion, resume from a journaled state, cancel → compensation, cancel → resumable |
 | Launch / teardown / k3s machines | `provider::fake::FakeProvider`, a small simulated cloud with scripted per-offer behaviors (`Boots`, `CreateFails`, `CreatedButErrors`, `BootFails`, `NeverBoots`, …), injectable delete failures, a call log, and a max-concurrent-instances counter for leak and duplicate checks |
-| Adapters | pure parsing and classification tests, plus `wiremock` HTTP servers for Prime Intellect and GCP |
+| Adapters | pure parsing and classification tests, plus `wiremock` HTTP servers for each HTTP cloud |
+| Adapters + state machines | [vendor API stubs](vendor-stubs.md): stateful simulations of each vendor's API (moto for AWS), five shared scenarios per vendor |
 | End to end | `tests/docker_e2e.rs`: the Docker cloud plus real SSH. It provisions, runs a command, re-provisions (reuse), simulates a crash after create (adopts the container, no duplicate), and tears down. |
 
 Async tests run on paused time (`#[tokio::test(start_paused = true)]`), so the
@@ -39,7 +41,7 @@ The launch-machine suite pins the behaviors that matter most:
 | Workflow | Runs |
 |---|---|
 | `.github/workflows/unit.yml` | fmt, clippy (`-D warnings`), unit tests on Linux and macOS, MSRV (1.91.1) check |
-| `.github/workflows/integration.yml` | the Docker e2e suite on Linux, with `GPUPROV_E2E_REQUIRE_DOCKER=1` so a missing daemon fails the job instead of skipping |
+| `.github/workflows/integration.yml` | `vendor-stubs` (every HTTP cloud adapter against its stub), `aws-moto` (AWS against the moto emulator, as a service container), and `docker-e2e` (the Docker e2e suite plus the acceptance-harness self-test, with `GPUPROV_E2E_REQUIRE_DOCKER=1` so a missing daemon fails the job instead of skipping) |
 | `.github/workflows/docs.yml` | strict MkDocs build on docs PRs; deploys to GitHub Pages on pushes to `main` |
 
 ## Manual testing against real clouds

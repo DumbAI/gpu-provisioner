@@ -223,7 +223,7 @@ impl CloudProvider for PrimeIntellectProvider {
         Capabilities {
             unsupported: UNSUPPORTED,
             // Pods take no user data; workloads are pushed over SSH.
-            cloud_init: false,
+            boot_script: false,
             boot_timeout: BOOT_TIMEOUT,
             delete_timeout: BOOT_TIMEOUT,
             poll_interval: POLL_INTERVAL,
@@ -361,6 +361,7 @@ mod tests {
             user_data: String::new(),
             ssh_public_key: KEY.into(),
             ssh_user: "ubuntu".into(),
+            boot_script: None,
         }
     }
 

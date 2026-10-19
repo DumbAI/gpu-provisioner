@@ -88,6 +88,7 @@ pub fn prepare(
             user_data,
             ssh_public_key: public_key_openssh.trim().to_string(),
             ssh_user,
+            boot_script: None,
         },
         request: ResourceRequest {
             ask,

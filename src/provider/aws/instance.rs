@@ -13,6 +13,8 @@ use crate::provider::{
     ErrorKind, InstanceSpec, InstanceStatus, Observed, Offer, ProviderError, SshEndpoint,
 };
 
+use crate::userdata;
+
 use super::bootstrap::{security_group_name, Bootstrapped};
 use super::error;
 use super::{filter, filter_values};
@@ -106,7 +108,7 @@ async fn run_instance(
                 .build(),
         )
         .tag_specifications(instance_tags(&spec.vm_name))
-        .user_data(BASE64.encode(spec.user_data.as_bytes()));
+        .user_data(BASE64.encode(userdata::render(spec).as_bytes()));
     if spec.spot {
         call = call.instance_market_options(
             InstanceMarketOptionsRequest::builder()

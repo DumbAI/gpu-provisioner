@@ -29,6 +29,7 @@ fn spec() -> InstanceSpec {
         user_data: "#cloud-config\n".into(),
         ssh_public_key: "ssh-ed25519 AAAA".into(),
         ssh_user: "ubuntu".into(),
+        boot_script: None,
     }
 }
 

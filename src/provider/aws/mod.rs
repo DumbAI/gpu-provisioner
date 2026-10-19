@@ -70,6 +70,10 @@ impl AwsProvider {
             tracing::debug!("using AWS profile '{profile}' from the config file");
             loader = loader.profile_name(profile);
         }
+        if let Some(endpoint) = &cfg.endpoint_url {
+            tracing::debug!("sending AWS API calls to {endpoint}");
+            loader = loader.endpoint_url(endpoint);
+        }
         let base = loader.load().await;
         Self {
             base,
@@ -117,7 +121,7 @@ impl CloudProvider for AwsProvider {
         // cloud-init. EC2 boots in ~1 min; the default 10-minute boot budget
         // matches the boto3 `instance_running` waiter.
         Capabilities {
-            cloud_init: true,
+            boot_script: true,
             ..Capabilities::default()
         }
     }

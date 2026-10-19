@@ -14,6 +14,25 @@
 //! # team_id = "..."             # bill pods to a team
 //! # regions = ["united_states"] # default region filter (empty = anywhere)
 //!
+//! [runpod]
+//! api_key = "..."               # else $RUNPOD_API_KEY, else ~/.runpod/config.toml
+//! # regions = ["north_america"] # continents or ISO country codes (empty = anywhere)
+//!
+//! [verda]
+//! client_id = "..."             # else $VERDA_CLIENT_ID
+//! client_secret = "..."         # else $VERDA_CLIENT_SECRET
+//! # regions = ["FIN-01"]        # location codes or ISO country codes (empty = anywhere)
+//!
+//! [massedcompute]
+//! api_key = "..."               # else $MASSED_COMPUTE_API_KEY
+//!
+//! [hyperstack]
+//! api_key = "..."               # else $HYPERSTACK_API_KEY
+//! # regions = ["CANADA-1"]      # default: North American regions
+//!
+//! [lambda]
+//! api_key = "..."               # else $LAMBDA_API_KEY
+//!
 //! [gcp]
 //! project = "my-project"        # else $GOOGLE_CLOUD_PROJECT / gcloud config
 //! # regions = ["us-central1"]   # default failover order
@@ -42,6 +61,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub gcp: GcpConfig,
     #[serde(default)]
+    pub runpod: RunpodConfig,
+    #[serde(default)]
+    pub verda: VerdaConfig,
+    #[serde(default)]
+    pub massedcompute: ApiKeyConfig,
+    #[serde(default)]
+    pub hyperstack: ApiKeyConfig,
+    #[serde(default)]
+    pub lambda: ApiKeyConfig,
+    #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
     pub defaults: Defaults,
@@ -55,6 +84,11 @@ impl AppConfig {
         match provider {
             "primeintellect" => &self.primeintellect.regions,
             "gcp" => &self.gcp.regions,
+            "runpod" => &self.runpod.regions,
+            "verda" => &self.verda.regions,
+            "massedcompute" => &self.massedcompute.regions,
+            "hyperstack" => &self.hyperstack.regions,
+            "lambda" => &self.lambda.regions,
             "docker" => &self.docker.regions,
             _ => &self.defaults.regions,
         }
@@ -70,6 +104,9 @@ pub struct AwsConfig {
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
+    /// Send every EC2/SSM call to this endpoint instead of AWS (an
+    /// AWS-compatible emulator such as moto or LocalStack).
+    pub endpoint_url: Option<String>,
 }
 
 /// Prime Intellect API access. Key resolution order: `api_key` here →
@@ -100,6 +137,53 @@ pub struct GcpConfig {
     /// API base URL override (testing).
     pub base_url: Option<String>,
     /// Default failover regions (e.g. `us-central1`); zones are derived.
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+/// RunPod (REST API v2). Key resolution order: `api_key` here →
+/// `$RUNPOD_API_KEY` → the runpod CLI's `~/.runpod/config.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunpodConfig {
+    pub api_key: Option<String>,
+    /// API base URL override (testing).
+    pub base_url: Option<String>,
+    /// Default region filter: continents (`north_america`, `europe`, …) or
+    /// ISO country codes (`US`, `CA`); empty = any data center.
+    #[serde(default)]
+    pub regions: Vec<String>,
+    /// Container image for pods; must start sshd from `$PUBLIC_KEY` (all
+    /// official `runpod/*` images do). Default: `runpod/base` with CUDA.
+    pub image: Option<String>,
+}
+
+/// Verda (REST API v1, OAuth client credentials). Resolution order:
+/// `client_id`/`client_secret` here → `$VERDA_CLIENT_ID` /
+/// `$VERDA_CLIENT_SECRET`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerdaConfig {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// API base URL override (testing).
+    pub base_url: Option<String>,
+    /// Default region filter: location codes (`FIN-01`) or ISO country
+    /// codes (`FI`, `IS`); empty = any location.
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+/// A cloud authenticated by a single API key (Massed Compute, Hyperstack,
+/// Lambda). Each adapter documents its key's environment-variable fallback.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiKeyConfig {
+    pub api_key: Option<String>,
+    /// API base URL override (testing).
+    pub base_url: Option<String>,
+    /// Default region filter (the cloud's own region names); empty = the
+    /// adapter's default (documented per cloud).
     #[serde(default)]
     pub regions: Vec<String>,
 }

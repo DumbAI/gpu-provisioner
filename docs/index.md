@@ -23,8 +23,9 @@ $ gpuprov down dev
 
 ## What it does
 
-- **Multi-cloud, one interface.** AWS (EC2), GCP (Compute Engine), Prime Intellect
-  (a GPU marketplace), and a local Docker "cloud" for tests all sit behind one
+- **Multi-cloud, one interface.** AWS, GCP, budget GPU clouds (Massed Compute,
+  Hyperstack, Lambda, Verda), GPU marketplaces (Prime Intellect, RunPod), and a
+  local Docker "cloud" for tests all sit behind one
   [`CloudProvider`](architecture/adding-a-cloud.md) trait of six idempotent
   primitives.
 - **Failover that does not leak.** Offers are tried in price order. A capacity error

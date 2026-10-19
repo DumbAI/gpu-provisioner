@@ -293,7 +293,7 @@ impl CloudProvider for GcpProvider {
         // Everything is supported; Ubuntu and Deep Learning VM images apply
         // the `user-data` metadata key with cloud-init.
         Capabilities {
-            cloud_init: true,
+            boot_script: true,
             ..Capabilities::default()
         }
     }

@@ -29,7 +29,7 @@ use gpu_provisioner::vm::teardown::{TeardownMachine, TeardownState};
 #[command(
     name = "gpuprov",
     version,
-    about = "Provision GPU VMs across clouds (AWS, GCP, Prime Intellect) with failover, durable \
+    about = "Provision GPU VMs across clouds (AWS, GCP, Lambda, Hyperstack, Massed Compute, Verda, RunPod, Prime Intellect) with failover, durable \
              state machines and single-node k3s clusters"
 )]
 struct Cli {
@@ -70,11 +70,13 @@ struct ProvisionArgs {
     /// YAML spec file; flags below override its fields
     #[arg(long, value_name = "FILE")]
     spec: Option<PathBuf>,
-    /// Cloud: aws (default), gcp, primeintellect, docker
+    /// Cloud: aws (default), gcp, massedcompute, hyperstack, lambda, verda,
+    /// primeintellect, runpod, docker
     #[arg(long)]
     cloud: Option<String>,
     /// Exact instance type, e.g. g5.xlarge (AWS), g2-standard-8 (GCP),
-    /// hyperstack/n3-H100x1 (Prime Intellect), container (docker)
+    /// hyperstack/n3-H100x1 (Prime Intellect), "NVIDIA H100 80GB HBM3" (RunPod), 1H100.80S.22V (Verda), gpu_1x_a6000 (Lambda),
+    /// container (docker)
     #[arg(long, conflicts_with = "gpus")]
     instance_type: Option<String>,
     /// GPU shorthand resolved by the cloud's catalog, e.g. A10G:1, L4:1, H100:8

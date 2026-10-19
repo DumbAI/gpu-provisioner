@@ -38,8 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::kube::{self, AccessMode, BootDecision, KubeAccess, Node};
 use crate::machine::{Machine, RetryPolicy, Step, StepCx};
-use crate::provider::Feature;
-use crate::userdata;
+use crate::provider::{BootScript, Feature};
 use crate::util::Paths;
 use crate::vm::launch::{LaunchMachine, LaunchState, ReadyVm};
 
@@ -109,18 +108,16 @@ pub struct K3sMachine<'a> {
 }
 
 impl<'a> K3sMachine<'a> {
-    /// Wrap a VM launch, adapting it to the provider's capabilities: embed the
-    /// installer in the boot user data when the cloud runs cloud-init, and
+    /// Wrap a VM launch, adapting it to the provider's capabilities: hand the
+    /// installer to the VM as its boot script when the cloud can run one, and
     /// pick the API access mode (`Direct` asks the VM layer for the k3s ports).
     pub fn new(mut launch: LaunchMachine<'a>, paths: &'a Paths) -> Self {
         let caps = launch.provider.capabilities();
-        if caps.cloud_init {
-            launch.spec.user_data = userdata::with_boot_script(
-                &launch.spec.user_data,
-                kube::BOOT_SCRIPT_PATH,
-                kube::K3S_INSTALL_SCRIPT,
-                &[("GPUPROV_INSTALL_ORIGIN", "boot")],
-            );
+        if caps.boot_script {
+            launch.spec.boot_script = Some(BootScript {
+                script: kube::K3S_INSTALL_SCRIPT.to_string(),
+                env: vec![("GPUPROV_INSTALL_ORIGIN".into(), "boot".into())],
+            });
         }
         let mode = if caps.supports(Feature::OpenPorts) {
             for port in kube::K3S_PORTS {
@@ -422,6 +419,7 @@ mod tests {
                 user_data: String::new(),
                 ssh_public_key: "ssh-ed25519 AAAA".into(),
                 ssh_user: "ubuntu".into(),
+                boot_script: None,
             },
             request: ResourceRequest {
                 ask: ResourceAsk::InstanceType("t".into()),
@@ -465,25 +463,22 @@ mod tests {
     }
 
     #[test]
-    fn installer_rides_in_user_data_only_on_cloud_init_clouds() {
+    fn installer_becomes_the_boot_script_only_on_clouds_that_run_one() {
         let (_dir, paths) = paths();
         let db = Db::open_in_memory().unwrap();
 
         let mut booting = FakeProvider::new(vec![]);
-        booting.cloud_init = true;
+        booting.boot_script = true;
         let machine = K3sMachine::new(launch(&booting, &db, &paths), &paths);
-        let user_data: serde_yaml::Value =
-            serde_yaml::from_str(&machine.launch.spec.user_data).unwrap();
-        assert_eq!(user_data["write_files"][0]["path"], kube::BOOT_SCRIPT_PATH);
-        assert!(machine
-            .launch
-            .spec
-            .user_data
-            .contains("GPUPROV_INSTALL_ORIGIN=boot"));
+        let boot = machine.launch.spec.boot_script.as_ref().unwrap();
+        assert_eq!(boot.script, kube::K3S_INSTALL_SCRIPT);
+        assert_eq!(boot.env, [("GPUPROV_INSTALL_ORIGIN".into(), "boot".into())]);
+        // The login document itself is untouched; adapters render the two.
+        assert!(!machine.launch.spec.user_data.contains("write_files"));
 
         let plain = FakeProvider::new(vec![]);
         let machine = K3sMachine::new(launch(&plain, &db, &paths), &paths);
-        assert!(!machine.launch.spec.user_data.contains("write_files"));
+        assert!(machine.launch.spec.boot_script.is_none());
     }
 
     #[test]

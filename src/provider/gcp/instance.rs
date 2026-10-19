@@ -5,6 +5,7 @@
 use serde_json::{json, Value};
 
 use crate::provider::{InstanceSpec, InstanceStatus, Observed, SshEndpoint};
+use crate::userdata;
 
 use super::api::Instance;
 use super::catalog::{basename, TypeChoice};
@@ -75,7 +76,7 @@ pub fn insert_body(
             // The guest agent creates the user from `ssh-keys`; cloud-init
             // (where the image runs it) applies `user-data` as on AWS.
             {"key": "ssh-keys", "value": format!("{}:{}", spec.ssh_user, spec.ssh_public_key.trim())},
-            {"key": "user-data", "value": spec.user_data},
+            {"key": "user-data", "value": userdata::render(spec)},
         ]},
         "scheduling": scheduling,
     });
@@ -176,6 +177,7 @@ mod tests {
             user_data: "#cloud-config\n".into(),
             ssh_public_key: "ssh-ed25519 AAAA key\n".into(),
             ssh_user: "ubuntu".into(),
+            boot_script: None,
         }
     }
 

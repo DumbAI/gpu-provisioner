@@ -1,7 +1,10 @@
 name: Integration tests
 
-# End-to-end runs of the real launch/teardown state machines against the
-# Docker test cloud: each "VM" is an sshd container reached over real SSH.
+# Integration runs of the real launch/teardown state machines:
+# - vendor-stubs: every HTTP cloud adapter against a stateful stub of its API;
+# - aws-moto:     the AWS adapter against the moto EC2/SSM emulator;
+# - docker-e2e:   the Docker test cloud, where each "VM" is an sshd container
+#                 reached over real SSH, plus the acceptance-harness self-test.
 on:
   push:
     branches: [main]
@@ -18,6 +21,41 @@ env:
   GPUPROV_E2E_REQUIRE_DOCKER: "1"
 
 jobs:
+  vendor-stubs:
+    name: vendor API stubs
+    # Every HTTP cloud adapter + the real state machines against a stateful
+    # stub of its vendor API (tests/stubs/): lifecycle with leak check,
+    # capacity failover, interrupt cleanup, reuse. No network or credentials.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run vendor stub integrations
+        run: cargo test --locked --test vendor_stubs -- --nocapture
+
+  aws-moto:
+    name: AWS against moto
+    # The AWS adapter + state machines against moto, a maintained emulator of
+    # the EC2/SSM APIs (the EC2 Query/XML protocol is not worth hand-stubbing).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      moto:
+        image: motoserver/moto:5.2.3
+        ports:
+          - 5000:5000
+    env:
+      GPUPROV_MOTO_ENDPOINT: http://127.0.0.1:5000
+      GPUPROV_E2E_REQUIRE_MOTO: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run AWS integrations against moto
+        run: cargo test --locked --test aws_moto -- --ignored --nocapture
+
   docker-e2e:
     name: docker e2e
     # GitHub's Linux runners ship Docker and the OpenSSH client.
@@ -31,6 +69,14 @@ jobs:
         run: docker info --format '{{.ServerVersion}} {{.OperatingSystem}}'
       - name: Run e2e tests
         run: cargo test --locked --test docker_e2e -- --ignored --nocapture
+      # Self-test of the provider acceptance harness, pointed at the Docker
+      # cloud (real clouds need accounts and are run by hand).
+      - name: Run acceptance harness against the Docker cloud
+        env:
+          GPUPROV_ACCEPT: "1"
+          GPUPROV_ACCEPT_CLOUD: docker
+          GPUPROV_ACCEPT_INSTANCE_TYPE: container
+        run: cargo test --locked --test acceptance -- --ignored --nocapture --test-threads=1
       - name: Leftover containers (debug)
         if: always()
         run: docker ps -a --filter label=gpuprov-managed=true

@@ -27,9 +27,10 @@ with a note. An explicit `--k8s` there is rejected before anything is created.
 The cluster is a [state machine](../architecture/state-machines.md#45-k3s-cluster-machine-clusterk3srs)
 layered on the VM launch machine. The installer can reach the node by two routes:
 
-1. **Boot.** On clouds that boot with cloud-init (AWS, GCP), the installer rides in
-   the VM's user data and runs while the VM boots, so the install overlaps the
-   wait for SSH.
+1. **Boot.** On clouds that can run a script at first boot, the installer runs
+   while the VM boots, so the install overlaps the wait for SSH. AWS, GCP,
+   Hyperstack and Lambda get it through cloud-init user data; Verda gets it as a
+   startup script.
 2. **SSH.** Once the VM is up, gpuprov checks what the boot run did (one SSH round
    trip: a status marker, `cloud-init status`, the k3s unit, GPU presence):
 
@@ -69,8 +70,8 @@ command to retry; it reuses the VM and re-checks the install. Or run
 
 | Mode | When | Kubeconfig server | You run |
 |---|---|---|---|
-| Direct | the cloud can open ports (AWS, GCP) | `https://<public-ip>:6443` | nothing |
-| SSH tunnel | the cloud can't (Prime Intellect) | `https://127.0.0.1:16443` | `gpuprov tunnel <name>` in another terminal |
+| Direct | the cloud can open ports (AWS, GCP, Hyperstack, Lambda) | `https://<public-ip>:6443` | nothing |
+| SSH tunnel | the cloud can't (Massed Compute, Verda, Prime Intellect) | `https://127.0.0.1:16443` | `gpuprov tunnel <name>` in another terminal |
 
 The API certificate covers the public host and always covers `127.0.0.1`. At boot
 the installer learns the public IP from the cloud's metadata service. If it

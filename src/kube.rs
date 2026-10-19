@@ -35,8 +35,6 @@ pub const K3S_PORTS: [u16; 3] = [6443, 80, 443];
 pub const API_PORT: u16 = 6443;
 /// Local end of `gpuprov tunnel` for clouds without inbound ports.
 pub const TUNNEL_LOCAL_PORT: u16 = 16443;
-/// Where cloud-init writes the installer for the boot route.
-pub const BOOT_SCRIPT_PATH: &str = "/opt/gpuprov/install-k3s.sh";
 
 /// Run as root. Environment:
 /// - `GPUPROV_INSTALL_ORIGIN` — `boot` or `ssh` (recorded in the marker);

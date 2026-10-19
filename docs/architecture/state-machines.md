@@ -1,7 +1,7 @@
 # Provisioning State Machines — Design
 
 **Status:** implemented. This page describes the code in `src/machine/`, `src/vm/`, `src/cluster/`, and `src/provider/`. Section 1 records the review of the previous design that motivated it.
-**Scope:** the VM lifecycle state machine (launch, teardown), the k3s cluster state machine layered on it, and the provider contract that AWS, Prime Intellect, GCP and the Docker test cloud implement.
+**Scope:** the VM lifecycle state machine (launch, teardown), the k3s cluster state machine layered on it, and the provider contract that every cloud adapter implements (AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect, RunPod, and the Docker test cloud).
 
 ---
 
@@ -53,7 +53,7 @@ main.rs ─ CLI: provision / down / status / ssh / kubeconfig / tunnel / list
     machine/          Executor<M: Machine>: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, primeintellect, gcp, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 ```
 
 ### 4.1 The provider contract (`provider/mod.rs`)
@@ -185,7 +185,7 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-* **Boot first, SSH as fallback.** On clouds whose capabilities report `cloud_init`, `K3sMachine::new` appends the installer to the VM's user data, so k3s installs while the VM boots. The installer serializes on a host-wide `flock`, records `state=running|done|failed` in `/var/lib/gpuprov/k3s-install.status`, and owns `/etc/rancher/k3s/config.yaml` (re-rendered from a SAN list, restarting k3s only when it changes). `CheckingBootInstall` reads the marker plus `cloud-init status`, the k3s unit state, and GPU presence in one SSH round trip. A pure decision table (`kube::BootProbe::decide`) maps that to *installed*, *wait*, or *fall back to SSH*.
+* **Boot first, SSH as fallback.** On clouds whose capabilities report `boot_script`, `K3sMachine::new` sets the installer as the VM's `InstanceSpec::boot_script`, a structured script plus env, so k3s installs while the VM boots. Each adapter delivers it natively: AWS and GCP render it into cloud-init (`userdata::render`), and Verda creates a startup-script resource (`BootScript::to_shell`). The k3s layer never touches a cloud-specific format. The installer serializes on a host-wide `flock`, records `state=running|done|failed` in `/var/lib/gpuprov/k3s-install.status`, and owns `/etc/rancher/k3s/config.yaml` (re-rendered from a SAN list, restarting k3s only when it changes). `CheckingBootInstall` reads the marker plus `cloud-init status`, the k3s unit state, and GPU presence in one SSH round trip. A pure decision table (`kube::BootProbe::decide`) maps that to *installed*, *wait*, or *fall back to SSH*.
 * **TLS SAN.** At boot the installer learns the public IP from the AWS/GCP metadata services. If that fails, `Validating` sees the API certificate doesn't cover the public host and re-runs the installer once with the SAN.
 * **Composition.** `K3sState::Vm(LaunchState)` delegates `step` to the child machine and lifts its result. A child terminal `Ready(vm)` becomes `CheckingBootInstall { vm }`. One journal row per VM name holds the whole nested state.
 * **Access mode.** `Direct` (the cloud opens 6443/80/443) or `SshTunnel` (`gpuprov tunnel <name>` forwards `127.0.0.1:6443`). The choice comes from provider capabilities, so k3s works on Prime Intellect.
@@ -193,20 +193,24 @@ stateDiagram-v2
 
 ## 5. Adapters
 
-| Primitive | AWS (EC2) | Prime Intellect (REST) | GCP (Compute REST) | Docker (test cloud) |
-|---|---|---|---|---|
-| plan | static GPU→type ladder × regions | live `GET /availability/gpus` → one offer per data center, cheapest first | static GPU→machine-type ladder × zones that offer the type (live) | one offer, `local` |
-| prepare | type metadata, zones offering it, AMI, default-VPC subnets, per-VM SG | find-or-register SSH key → `sshKeyId`; re-validate offer | per-VM firewall rule (network tag); image family → image | build the sshd image if missing |
-| create | `RunInstances` (fail-fast client, subnets in order) | `POST /pods` with offer's cloudId/socket/dc + `sshKeyId` | `instances.insert` + wait for the zone operation | `docker run` sshd with `authorized_keys` |
-| observe | `DescribeInstances` by tag | `GET /pods` by name, `sshConnection` → user/port | `instances.list` by label | `docker ps/inspect` by label, mapped port |
-| delete | `TerminateInstances` | `DELETE /pods/{id}` | `instances.delete` | `docker rm -f` |
-| cleanup | delete SG | — | delete firewall rule | — |
-| unsupported | — | ports, image, spot | — | ports, image, spot, Kubernetes |
-| `cloud_init` (k3s at boot) | ✓ | ✗ (SSH route) | ✓ | ✗ |
+Each cloud's page under [Clouds](../clouds/index.md) has the details. This is how
+each one maps onto the primitives:
+
+| Cloud | plan | prepare | create | observe | delete / cleanup | boot script |
+|---|---|---|---|---|---|---|
+| AWS (EC2) | static GPU→type ladder × regions | type metadata, offering zones, AMI, default-VPC subnets, per-VM SG | `RunInstances` (fail-fast client, subnets in order) | `DescribeInstances` by tag | `TerminateInstances` / delete SG | cloud-init |
+| GCP (Compute REST) | static ladder × zones that offer the type (live) | per-VM firewall rule; image family → image | `instances.insert` + wait for the zone operation | `instances.list` by label | `instances.delete` / delete firewall rule | cloud-init |
+| Massed Compute | live `GET /gpu-inventory` | find-or-register SSH key; re-check capacity; pick image | `POST /instance/launch` (region `any`) | `GET /instance` by name | `POST /instance/terminate` / — | — (SSH route) |
+| Hyperstack | live flavors ⨝ `/core/stocks` ⨝ `/pricebook` per region | re-check stock; find-or-create environment + key pair; pick image | `POST /core/virtual-machines` with labels, public IP, security rules | VM list by environment + exact name | `DELETE` VM / — | cloud-init |
+| Lambda | live `GET /instance-types` (capacity per region) | re-check capacity; find-or-register SSH key; per-VM firewall ruleset when ports are needed | `POST /instance-operations/launch` with tags + `user_data` | `GET /instances` by tag | `terminate` / delete ruleset | cloud-init |
+| Verda (REST v1) | instance types × per-location availability (spot or on-demand) | find-or-register SSH key; startup script from the boot script; re-check stock; pick image | `POST /v1/instances` with tags, OS volume, key, startup script | `GET /v1/instances?tag=…` | `delete` incl. volumes / tagged volumes + scripts | startup script |
+| Prime Intellect (REST) | live `GET /availability/gpus`, one offer per data center | find-or-register SSH key → `sshKeyId`; re-validate offer | `POST /pods` with the offer's cloudId/socket/dc + `sshKeyId` | `GET /pods` by name; `sshConnection` → user/port | `DELETE /pods/{id}` / — | — (SSH route) |
+| RunPod (REST v2) | live `GET /v2/catalog/gpus?include=AVAILABILITY` per tier | merge account keys (read-only) into `PUBLIC_KEY`; re-validate stock | `POST /v2/pods` (GPU id/count, tier, data center, `22/tcp`) | `GET /v2/pods` by name; `ssh.direct` | `DELETE /v2/pods/{id}` / — | — (no k3s) |
+| Docker (test cloud) | one offer, `local` | build the sshd image if missing | `docker run` sshd with `authorized_keys` | `docker ps/inspect` by label | `docker rm -f` / — | — (no k3s) |
 
 ## 6. Testing
 
 * **Executor tests:** a toy machine checks persistence, resume after a simulated crash, retry exhaustion, and the cancellation mapping.
 * **Launch-machine tests:** a scripted `FakeProvider` covers failover across offers, quota blocking a region, crash between create and journal (adopts the instance and does not create a duplicate), fatal error after create (compensates), and a failed teardown (`Leaked`, resolved by the next run).
-* **Adapter tests:** pure classification and parsing tests. HTTP adapters (Prime Intellect, GCP) run against `wiremock`.
+* **Adapter tests:** pure classification and parsing tests. HTTP adapters (every cloud except AWS and Docker) run against `wiremock`.
 * **Integration (`tests/docker_e2e.rs`, `#[ignore]` unless Docker is present):** the `docker` provider provisions a real sshd container through the full launch machine, runs a command over SSH, re-provisions idempotently, and tears down. Run with `cargo test --test docker_e2e -- --ignored`.

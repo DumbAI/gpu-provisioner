@@ -51,8 +51,8 @@ pub struct FakeProvider {
     /// `delete` errors: `Some(n)` fails the next n calls, `u32::MAX` forever.
     pub delete_failures: Mutex<u32>,
     pub unsupported: &'static [(Feature, &'static str)],
-    /// Reported as `Capabilities::cloud_init`.
-    pub cloud_init: bool,
+    /// Reported as `Capabilities::boot_script`.
+    pub boot_script: bool,
     pub ssh_user: Option<String>,
     pub ssh_port: u16,
     /// Max observed concurrent live instances per VM (leak/duplicate check).
@@ -71,7 +71,7 @@ impl FakeProvider {
             calls: Mutex::new(Vec::new()),
             delete_failures: Mutex::new(0),
             unsupported: &[],
-            cloud_init: false,
+            boot_script: false,
             ssh_user: None,
             ssh_port: 22,
             max_live: Mutex::new(HashMap::new()),
@@ -165,7 +165,7 @@ impl CloudProvider for FakeProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             unsupported: self.unsupported,
-            cloud_init: self.cloud_init,
+            boot_script: self.boot_script,
             boot_timeout: Duration::from_secs(60),
             delete_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_secs(1),

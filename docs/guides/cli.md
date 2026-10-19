@@ -17,12 +17,12 @@ resumed.
 |---|---|
 | `--name <NAME>` | VM name: lowercase letters, digits and `-`, up to 40 characters. It also works as `name:` in the spec file. |
 | `--spec <FILE>` | YAML spec file. Flags override its fields. |
-| `--cloud <ID>` | `aws` (default), `gcp`, `primeintellect`, or `docker`. |
-| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, or `container`. Cannot be combined with `--gpus`. |
+| `--cloud <ID>` | `aws` (default), `gcp`, `massedcompute`, `hyperstack`, `lambda`, `verda`, `primeintellect`, `runpod`, or `docker`. |
+| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, `"NVIDIA H100 80GB HBM3"` (RunPod), `1H100.80S.22V` (Verda), `gpu_1x_a6000` (Lambda), `n3-RTX-A6000x1` (Hyperstack), or `container`. Cannot be combined with `--gpus`. |
 | `--gpus <NAME[:N]>` | GPU shorthand resolved by the cloud's catalog, e.g. `T4:1`, `L4:1`, `A100-80GB:8`, `H100:8`. |
 | `--region <R>` | Candidate region, in failover order. Repeatable. Region names are cloud-specific. |
-| `--zone <Z>` | Pin to one zone (AWS and GCP) or data center (Prime Intellect). |
-| `--image <ID>` (alias `--ami`) | Machine-image override. |
+| `--zone <Z>` | Pin to one zone (AWS and GCP) or data center (Prime Intellect, RunPod). |
+| `--image <ID>` (alias `--ami`) | Machine-image override (container image on RunPod). |
 | `--disk <GB>` | Root disk size (default 100). |
 | `--spot` | Spot or preemptible capacity, where the cloud supports it. |
 | `--port <P>` | Extra inbound port besides SSH. Repeatable. Requires a cloud with firewall control. |
@@ -79,6 +79,6 @@ wait, kubeconfig fetch, and validation) and rewrites
 
 ## `gpuprov tunnel <NAME>`
 
-For clusters on clouds without inbound-port control (Prime Intellect),
+For clusters on clouds without inbound-port control (Massed Compute, Verda, Prime Intellect),
 forwards `127.0.0.1:16443` to the node's API server. The kubeconfig of such
 clusters already points there. Keep it running while you use `kubectl`.

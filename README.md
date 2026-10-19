@@ -4,7 +4,8 @@
 [![Integration tests](https://github.com/DumbAI/gpu-provisioner/actions/workflows/integration.yml/badge.svg)](https://github.com/DumbAI/gpu-provisioner/actions/workflows/integration.yml)
 
 GPU machines with Kubernetes on them, from one command. `gpuprov` provisions a GPU
-VM on **AWS**, **GCP**, or **Prime Intellect**, failing over across offers,
+VM on **AWS**, **GCP**, **Massed Compute**, **Hyperstack**, **Lambda**, **Verda**,
+**Prime Intellect**, or **RunPod**, failing over across offers,
 regions, and zones until one has capacity. It turns the VM into a validated
 single-node **k3s** cluster (on by default; `--no-k8s` for a plain VM), waits
 until SSH and the cluster are healthy, and records everything locally.
@@ -65,6 +66,17 @@ gpuprov down demo
 # AWS (default cloud): cheapest T4 type, us-west-2 then us-east-1
 gpuprov provision --name dev --gpus T4:1 --region us-west-2 --region us-east-1
 
+# budget 48 GB GPUs: Massed Compute (US) or Hyperstack (Canada), Lambda as a US fallback
+gpuprov provision --cloud massedcompute --name dev --gpus A6000:1
+gpuprov provision --cloud hyperstack --name dev-ca --gpus A6000:1 --region CANADA-1
+gpuprov provision --cloud lambda --name dev-us --gpus A6000:1
+
+# RunPod: cheapest in-stock RTX 4090 pod, secure or community cloud
+gpuprov provision --cloud runpod --name rp --gpus RTX4090:1
+
+# Verda: cheapest in-stock H100 instance, spot capacity, in Finland
+gpuprov provision --cloud verda --name vd --gpus H100:1 --spot --region FI
+
 # Prime Intellect marketplace: cheapest in-stock H100 anywhere
 gpuprov provision --cloud primeintellect --name pi --gpus H100:1
 
@@ -86,7 +98,7 @@ cluster::k3s   K3sMachine      Vm(child) → CheckingBootInstall → [Installing
 vm::launch     LaunchMachine   Reconciling → Planning → [Preparing → Creating → Booting → Connecting]* → Ready
 vm::teardown   TeardownMachine Requesting → AwaitingGone → CleaningUp → Done | Leaked
 machine        Executor        journal · retry budgets · polling · cancellation · resume · lease
-provider       CloudProvider   aws · gcp · primeintellect · docker
+provider       CloudProvider   aws · gcp · massedcompute · hyperstack · lambda · verda · primeintellect · runpod · docker
 ```
 
 The [state-machine design notes](docs/architecture/state-machines.md) explain each

@@ -13,7 +13,12 @@ pub mod docker;
 #[cfg(test)]
 pub mod fake;
 pub mod gcp;
+pub mod hyperstack;
+pub mod lambda;
+pub mod massedcompute;
 pub mod primeintellect;
+pub mod runpod;
+pub mod verda;
 
 use std::fmt;
 use std::str::FromStr;
@@ -32,6 +37,11 @@ pub const PROVIDER_IDS: &[&str] = &[
     aws::PROVIDER_ID,
     gcp::PROVIDER_ID,
     primeintellect::PROVIDER_ID,
+    runpod::PROVIDER_ID,
+    verda::PROVIDER_ID,
+    massedcompute::PROVIDER_ID,
+    hyperstack::PROVIDER_ID,
+    lambda::PROVIDER_ID,
     docker::PROVIDER_ID,
 ];
 
@@ -47,6 +57,15 @@ pub async fn build(
         primeintellect::PROVIDER_ID => Ok(Box::new(primeintellect::PrimeIntellectProvider::new(
             &config.primeintellect,
         )?)),
+        runpod::PROVIDER_ID => Ok(Box::new(runpod::RunpodProvider::new(&config.runpod)?)),
+        verda::PROVIDER_ID => Ok(Box::new(verda::VerdaProvider::new(&config.verda)?)),
+        massedcompute::PROVIDER_ID => Ok(Box::new(massedcompute::MassedComputeProvider::new(
+            &config.massedcompute,
+        )?)),
+        hyperstack::PROVIDER_ID => Ok(Box::new(hyperstack::HyperstackProvider::new(
+            &config.hyperstack,
+        )?)),
+        lambda::PROVIDER_ID => Ok(Box::new(lambda::LambdaProvider::new(&config.lambda)?)),
         docker::PROVIDER_ID => Ok(Box::new(docker::DockerProvider::new(&config.docker))),
         other => Err(ProviderError::invalid(format!(
             "unknown cloud provider '{other}' (available: {})",
@@ -141,6 +160,39 @@ pub struct InstanceSpec {
     /// Login user we ask for; clouds that dictate one report it in
     /// [`SshEndpoint::user`] instead.
     pub ssh_user: String,
+    /// A workload to run once as root at first boot (the k3s installer),
+    /// set only for providers whose capabilities report `boot_script`. Each
+    /// adapter delivers it its own way (cloud-init, a startup-script API).
+    #[serde(default)]
+    pub boot_script: Option<BootScript>,
+}
+
+/// A shell script plus environment, run once as root at first boot. Kept
+/// structured (not pre-rendered) so every cloud can deliver it natively.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootScript {
+    /// Full script text, starting with a shebang line.
+    pub script: String,
+    /// Variables exported before the script body runs.
+    pub env: Vec<(String, String)>,
+}
+
+impl BootScript {
+    /// The script as one self-contained shell file: the shebang, then
+    /// `export K='V'` lines, then the body — for clouds that take a plain
+    /// startup script rather than cloud-init.
+    pub fn to_shell(&self) -> String {
+        let (shebang, body) = match self.script.split_once('\n') {
+            Some((first, rest)) if first.starts_with("#!") => (first, rest),
+            _ => ("#!/usr/bin/env bash", self.script.as_str()),
+        };
+        let exports: String = self
+            .env
+            .iter()
+            .map(|(key, value)| format!("export {key}='{}'\n", value.replace('\'', r"'\''")))
+            .collect();
+        format!("{shebang}\n{exports}{body}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +349,11 @@ impl fmt::Display for Feature {
 #[derive(Debug, Clone)]
 pub struct Capabilities {
     pub unsupported: &'static [(Feature, &'static str)],
-    /// Whether instances run `InstanceSpec::user_data` (cloud-init) at boot.
-    /// Enables boot-time workload delivery (the k3s installer); without it,
-    /// workloads are pushed over SSH after the VM is up.
-    pub cloud_init: bool,
+    /// Whether the cloud can run `InstanceSpec::boot_script` at first boot
+    /// (via cloud-init, a startup-script API, …). Enables boot-time workload
+    /// delivery (the k3s installer); without it, workloads are pushed over
+    /// SSH after the VM is up.
+    pub boot_script: bool,
     /// Max time from `create` until the instance is running + reachable.
     pub boot_timeout: Duration,
     /// Max time from `delete` until the instances are gone.
@@ -313,7 +366,7 @@ impl Default for Capabilities {
     fn default() -> Self {
         Capabilities {
             unsupported: &[],
-            cloud_init: false,
+            boot_script: false,
             boot_timeout: Duration::from_secs(600),
             delete_timeout: Duration::from_secs(600),
             poll_interval: Duration::from_secs(5),
@@ -648,6 +701,24 @@ mod tests {
         assert!(err.msg.contains("no firewall API") && err.msg.contains("on-demand only"));
         assert!(!caps.supports(Feature::OpenPorts));
         assert!(caps.supports(Feature::ImageOverride));
+    }
+
+    #[test]
+    fn boot_script_renders_as_one_shell_file_with_exports() {
+        let boot = BootScript {
+            script: "#!/usr/bin/env bash\nset -e\necho \"$X\"\n".into(),
+            env: vec![("X".into(), "it's".into())],
+        };
+        assert_eq!(
+            boot.to_shell(),
+            "#!/usr/bin/env bash\nexport X='it'\\''s'\nset -e\necho \"$X\"\n"
+        );
+        // A script without a shebang gets one.
+        let bare = BootScript {
+            script: "echo hi\n".into(),
+            env: Vec::new(),
+        };
+        assert!(bare.to_shell().starts_with("#!/usr/bin/env bash\necho hi"));
     }
 
     #[test]

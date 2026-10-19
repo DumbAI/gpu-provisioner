@@ -135,7 +135,7 @@ impl CloudProvider for DockerProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             unsupported: UNSUPPORTED,
-            cloud_init: false,
+            boot_script: false,
             boot_timeout: Duration::from_secs(120),
             delete_timeout: Duration::from_secs(60),
             poll_interval: Duration::from_secs(1),
