@@ -25,6 +25,10 @@
          <lastmod>2026-10-19</lastmod>
     </url>
     <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/digitalocean/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/docker/</loc>
          <lastmod>2026-10-19</lastmod>
     </url>
@@ -78,6 +82,10 @@
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/guides/configuration/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/guides/health/</loc>
          <lastmod>2026-10-19</lastmod>
     </url>
     <url>

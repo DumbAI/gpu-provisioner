@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -443,6 +443,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -657,6 +685,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -1554,7 +1610,7 @@ attempted:</p>
     machine/          Executor&lt;M: Machine&gt;: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, gcp, massedcompute, hyperstack, lambda, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 </code></pre></div>
 <h3 id="41-the-provider-contract-providermodrs">4.1 The provider contract (<code>provider/mod.rs</code>)<a class="headerlink" href="#41-the-provider-contract-providermodrs" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
@@ -1602,6 +1658,10 @@ attempted:</p>
 <tr>
 <td><code>cleanup</code></td>
 <td>Delete per-VM side resources after instances are gone. Idempotent.</td>
+</tr>
+<tr>
+<td><code>diagnose</code> (optional)</td>
+<td>Vendor-side health for <code>gpuprov health</code>: the instance as the vendor sees it (<code>None</code> = gone) plus vendor-native findings. The default derives it from <code>observe</code>. Read-only.</td>
 </tr>
 </tbody>
 </table>
@@ -1778,6 +1838,15 @@ each one maps onto the primitives:</p>
 <td><code>POST /core/virtual-machines</code> with labels, public IP, security rules</td>
 <td>VM list by environment + exact name</td>
 <td><code>DELETE</code> VM / —</td>
+<td>cloud-init</td>
+</tr>
+<tr>
+<td>DigitalOcean</td>
+<td>live <code>GET /v2/sizes</code> × regions where available</td>
+<td>find-or-register SSH key; per-VM cloud firewall (by tag); pick the GPU image; re-check availability</td>
+<td><code>POST /v2/droplets</code> with tags + <code>user_data</code></td>
+<td><code>GET /v2/droplets?tag_name=…</code></td>
+<td><code>DELETE /v2/droplets/{id}</code> / delete firewall</td>
 <td>cloud-init</td>
 </tr>
 <tr>

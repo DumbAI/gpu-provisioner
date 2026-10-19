@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -443,6 +443,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -657,6 +685,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -949,6 +1005,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#health-diagnosis-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health diagnosis (optional)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#classifying-errors" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1195,6 +1262,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#health-diagnosis-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Health diagnosis (optional)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#classifying-errors" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1251,6 +1329,8 @@ journal, SSH, and k3s all come from the shared core.</p>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">observe</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">at</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Location</span><span class="p">,</span><span class="w"> </span><span class="n">vm_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Observed</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">delete</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">at</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Location</span><span class="p">,</span><span class="w"> </span><span class="n">vm_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">ids</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="p">[</span><span class="nb">String</span><span class="p">])</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
 <span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">cleanup</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">at</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Location</span><span class="p">,</span><span class="w"> </span><span class="n">vm_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
+<span class="w">    </span><span class="c1">// optional — default derived from `observe`:</span>
+<span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">diagnose</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">at</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Location</span><span class="p">,</span><span class="w"> </span><span class="n">vm_name</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span><span class="w"> </span><span class="n">instance_id</span><span class="p">:</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="kt">str</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="n">Diagnosis</span><span class="p">,</span><span class="w"> </span><span class="n">ProviderError</span><span class="o">&gt;</span><span class="p">;</span>
 <span class="p">}</span>
 </code></pre></div>
 <h2 id="the-contract">The contract<a class="headerlink" href="#the-contract" title="Permanent link">&para;</a></h2>
@@ -1299,6 +1379,42 @@ journal, SSH, and k3s all come from the shared core.</p>
 <code>Capabilities { boot_timeout, delete_timeout, poll_interval }</code>. The one exception
 is a bounded wait on a cloud operation whose <em>result</em> carries the error, as with
 GCP's <code>operations.wait</code> after <code>instances.insert</code>.</p>
+<h2 id="health-diagnosis-optional">Health diagnosis (optional)<a class="headerlink" href="#health-diagnosis-optional" title="Permanent link">&para;</a></h2>
+<p><code>gpuprov health</code> asks the adapter for a <code>Diagnosis</code>: the instance as the vendor
+sees it (<code>None</code> if it no longer exists, which means gone) plus vendor-native
+<code>Finding</code>s. The default implementation derives this from <code>observe</code>, so a new
+cloud gets health checks for free. If the vendor exposes more, such as status
+checks, scheduled maintenance, preemption reasons, or why an instance was
+terminated, override <code>diagnose</code> and return findings:</p>
+<table>
+<thead>
+<tr>
+<th>Severity</th>
+<th>Use for</th>
+<th>Verdict effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Finding::info</code></td>
+<td>context ("spot instance")</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>Finding::warn</code></td>
+<td>usable but at risk (scheduled retirement, maintenance)</td>
+<td>degraded</td>
+</tr>
+<tr>
+<td><code>Finding::critical</code></td>
+<td>the vendor considers it broken or reclaimed (failed status check, preempted)</td>
+<td>unhealthy</td>
+</tr>
+</tbody>
+</table>
+<p>Keep it read-only. Recently terminated instances are worth listing here, even
+though <code>observe</code> hides them, so a reclaim can be attributed ("terminated by the
+vendor: spot capacity reclaimed").</p>
 <h2 id="classifying-errors">Classifying errors<a class="headerlink" href="#classifying-errors" title="Permanent link">&para;</a></h2>
 <p>Map every API failure to an <code>ErrorKind</code>. This is the entire failover policy, and
 it lives in your <code>error.rs</code>:</p>

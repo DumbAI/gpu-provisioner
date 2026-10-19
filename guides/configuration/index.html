@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -536,6 +536,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -750,6 +778,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -1303,6 +1359,11 @@
 <span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $LAMBDA_API_KEY</span>
 <span class="c1"># regions = ["us-east-1"]      # default: US regions</span>
 
+<span class="k">[digitalocean]</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $DIGITALOCEAN_ACCESS_TOKEN (doctl's variable)</span>
+<span class="c1"># regions = ["tor1"]           # default: North American regions</span>
+<span class="c1"># regions = ["us-east-1"]      # default: US regions</span>
+
 <span class="k">[verda]</span>
 <span class="n">client_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">              </span><span class="c1"># else $VERDA_CLIENT_ID</span>
 <span class="n">client_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">          </span><span class="c1"># else $VERDA_CLIENT_SECRET</span>
@@ -1361,6 +1422,10 @@ marketplace".</p>
 <tr>
 <td>Lambda</td>
 <td><code>[lambda] api_key</code>, then <code>$LAMBDA_API_KEY</code></td>
+</tr>
+<tr>
+<td>DigitalOcean</td>
+<td><code>[digitalocean] api_key</code>, then <code>$DIGITALOCEAN_ACCESS_TOKEN</code>, then <code>$DIGITALOCEAN_TOKEN</code></td>
 </tr>
 <tr>
 <td>Verda</td>

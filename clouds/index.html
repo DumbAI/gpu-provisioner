@@ -6,14 +6,14 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
         <link rel="canonical" href="https://dumbai.github.io/gpu-provisioner/clouds/">
       
       
-        <link rel="prev" href="../guides/kubernetes/">
+        <link rel="prev" href="../guides/health/">
       
       
         <link rel="next" href="aws/">
@@ -443,6 +443,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -750,6 +778,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -1285,6 +1341,10 @@ adapter only maps a cloud's API onto the contract. Pick one with <code>--cloud &
 <td><code>aws</code>, <code>gcp</code></td>
 </tr>
 <tr>
+<td>an existing DigitalOcean account; Toronto RTX Ada / L40S, US H100 / MI300X</td>
+<td><code>digitalocean</code></td>
+</tr>
+<tr>
 <td>European capacity, spot pricing</td>
 <td><code>verda</code></td>
 </tr>
@@ -1353,6 +1413,14 @@ cheapest first.</p>
 <td><code>us-east-1</code>, …</td>
 <td>US regions</td>
 <td>live capacity per region</td>
+</tr>
+<tr>
+<td><a href="digitalocean/">DigitalOcean</a></td>
+<td><code>digitalocean</code></td>
+<td>GPU Droplet</td>
+<td><code>tor1</code>, <code>nyc2</code>, <code>atl1</code>, …</td>
+<td>North American regions</td>
+<td>live sizes × regions</td>
 </tr>
 <tr>
 <td><a href="verda/">Verda</a></td>
@@ -1454,6 +1522,16 @@ cheapest first.</p>
 <td>firewall ruleset (when ports are opened)</td>
 </tr>
 <tr>
+<td>DigitalOcean</td>
+<td>✓ at boot (cloud-init)</td>
+<td>direct</td>
+<td>✓ per-VM cloud firewall</td>
+<td>✗</td>
+<td>image slug / id</td>
+<td><code>root</code>@22</td>
+<td>cloud firewall (always: SSH + requested ports) and per-VM tag</td>
+</tr>
+<tr>
 <td>Verda</td>
 <td>✓ at boot (startup script)</td>
 <td>SSH tunnel</td>
@@ -1540,7 +1618,7 @@ See that page for the current results.</p>
       <nav class="md-footer__inner md-grid" aria-label="Footer" >
         
           
-          <a href="../guides/kubernetes/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Kubernetes (k3s)">
+          <a href="../guides/health/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Health checks">
             <div class="md-footer__button md-icon">
               
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
@@ -1550,7 +1628,7 @@ See that page for the current results.</p>
                 Previous
               </span>
               <div class="md-ellipsis">
-                Kubernetes (k3s)
+                Health checks
               </div>
             </div>
           </a>

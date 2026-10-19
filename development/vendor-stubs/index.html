@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -443,6 +443,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -657,6 +685,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -1411,6 +1467,13 @@ dropping Lambda's <code>user_data</code> fails the boot-script scenario.</p>
 <td><a href="https://docs.lambda.ai/api/cloud">Cloud API</a></td>
 <td><code>insufficient-capacity</code>, ruleset <code>in-use</code> on delete, <code>page_token</code> pagination, plus a dedicated firewall-ruleset test</td>
 <td>—</td>
+</tr>
+<tr>
+<td>DigitalOcean</td>
+<td><code>digitalocean.rs</code></td>
+<td><a href="https://docs.digitalocean.com/reference/api/digitalocean/">API v2</a></td>
+<td><code>422 unprocessable_entity</code> "Size is not available in this region." on create, <code>page</code>/<code>per_page</code> pagination (page size 1), Droplet still listed and <code>locked</code> for one list after delete, firewall referencing a missing tag (<code>422</code>), plus firewall and powered-off-health tests</td>
+<td>capacity status/wording not documented; firewall requires an existing tag</td>
 </tr>
 <tr>
 <td>GCP</td>

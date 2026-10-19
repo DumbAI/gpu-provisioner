@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -461,6 +461,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#gpuprov-health-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        gpuprov health [TARGET...]
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#gpuprov-status-name" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -556,6 +567,34 @@
     
   
     Kubernetes (k3s)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../health/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Health checks
   
 
     
@@ -783,6 +822,34 @@
     
   
     Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/digitalocean/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DigitalOcean
   
 
     
@@ -1261,6 +1328,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#gpuprov-health-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        gpuprov health [TARGET...]
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#gpuprov-status-name" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1352,11 +1430,11 @@ resumed.</p>
 </tr>
 <tr>
 <td><code>--cloud &lt;ID&gt;</code></td>
-<td><code>aws</code> (default), <code>gcp</code>, <code>massedcompute</code>, <code>hyperstack</code>, <code>lambda</code>, <code>verda</code>, <code>primeintellect</code>, <code>runpod</code>, or <code>docker</code>.</td>
+<td><code>aws</code> (default), <code>gcp</code>, <code>massedcompute</code>, <code>hyperstack</code>, <code>lambda</code>, <code>digitalocean</code>, <code>verda</code>, <code>primeintellect</code>, <code>runpod</code>, or <code>docker</code>.</td>
 </tr>
 <tr>
 <td><code>--instance-type &lt;T&gt;</code></td>
-<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, <code>"NVIDIA H100 80GB HBM3"</code> (RunPod), <code>1H100.80S.22V</code> (Verda), <code>gpu_1x_a6000</code> (Lambda), <code>n3-RTX-A6000x1</code> (Hyperstack), or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
+<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, <code>"NVIDIA H100 80GB HBM3"</code> (RunPod), <code>1H100.80S.22V</code> (Verda), <code>gpu_1x_a6000</code> (Lambda), <code>gpu-6000adax1-48gb</code> (DigitalOcean), <code>n3-RTX-A6000x1</code> (Hyperstack), or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
 </tr>
 <tr>
 <td><code>--gpus &lt;NAME[:N]&gt;</code></td>
@@ -1422,6 +1500,36 @@ It uses the recorded user and port.</p>
 endpoint (<code>host:port</code> when the port isn't 22).</p>
 <p>States: <code>PROVISIONING</code>, <code>UP</code>, <code>FAILED</code>, <code>TERMINATED</code>, and <code>LEAKED</code>. <code>LEAKED</code>
 means teardown could not be confirmed. Run <code>down</code> again.</p>
+<h2 id="gpuprov-health-target"><code>gpuprov health [TARGET...]</code><a class="headerlink" href="#gpuprov-health-target" title="Permanent link">&para;</a></h2>
+<p>Checks whether VMs are still running and usable, or were stopped, preempted, or
+reclaimed by the vendor. It asks the vendor first, then probes ping, TCP, and SSH,
+and falls back to those probes alone when the vendor API is unavailable.
+<code>TARGET</code> is a VM name, instance id, or IP; with none, it checks every live VM.
+An IP gpuprov has no record of gets network probes only.</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--deep</code></td>
+<td>also <code>nvidia-smi -L</code> and, for k3s VMs, the cluster's health</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>print the reports as JSON</td>
+</tr>
+<tr>
+<td><code>--port &lt;P&gt;</code></td>
+<td>port to probe for unrecorded addresses (default 22)</td>
+</tr>
+</tbody>
+</table>
+<p>Exit code: 0 healthy, 1 degraded, 2 unhealthy/gone, 3 unknown. See
+<a href="../health/">Health checks</a>.</p>
 <h2 id="gpuprov-status-name"><code>gpuprov status &lt;NAME&gt;</code><a class="headerlink" href="#gpuprov-status-name" title="Permanent link">&para;</a></h2>
 <p>Shows the VM row, the last operation's state (marked <em>in flight</em> if it was
 interrupted), and up to 30 recent journaled transitions with failure details.
