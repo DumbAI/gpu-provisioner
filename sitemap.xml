@@ -2,58 +2,86 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/getting-started/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/architecture/adding-a-cloud/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/architecture/state-machines/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/aws/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/docker/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/gcp/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/hyperstack/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/lambda/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/massedcompute/</loc>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/clouds/primeintellect/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/runpod/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/clouds/verda/</loc>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/development/acceptance/</loc>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/development/releasing/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/development/testing/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
+    </url>
+    <url>
+         <loc>https://dumbai.github.io/gpu-provisioner/development/vendor-stubs/</loc>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/guides/cli/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/guides/configuration/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
     <url>
          <loc>https://dumbai.github.io/gpu-provisioner/guides/kubernetes/</loc>
-         <lastmod>2026-10-18</lastmod>
+         <lastmod>2026-10-19</lastmod>
     </url>
 </urlset>

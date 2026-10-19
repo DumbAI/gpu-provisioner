@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -719,6 +719,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/massedcompute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Massed Compute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/hyperstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperstack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -727,6 +811,62 @@
     
   
     Prime Intellect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/runpod/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunPod
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/verda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verda
   
 
     
@@ -977,6 +1117,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../../development/vendor-stubs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vendor API stubs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/acceptance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider acceptance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../development/releasing/" class="md-nav__link">
         
   
@@ -1156,11 +1352,11 @@ resumed.</p>
 </tr>
 <tr>
 <td><code>--cloud &lt;ID&gt;</code></td>
-<td><code>aws</code> (default), <code>gcp</code>, <code>primeintellect</code>, or <code>docker</code>.</td>
+<td><code>aws</code> (default), <code>gcp</code>, <code>massedcompute</code>, <code>hyperstack</code>, <code>lambda</code>, <code>verda</code>, <code>primeintellect</code>, <code>runpod</code>, or <code>docker</code>.</td>
 </tr>
 <tr>
 <td><code>--instance-type &lt;T&gt;</code></td>
-<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
+<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, <code>"NVIDIA H100 80GB HBM3"</code> (RunPod), <code>1H100.80S.22V</code> (Verda), <code>gpu_1x_a6000</code> (Lambda), <code>n3-RTX-A6000x1</code> (Hyperstack), or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
 </tr>
 <tr>
 <td><code>--gpus &lt;NAME[:N]&gt;</code></td>
@@ -1172,11 +1368,11 @@ resumed.</p>
 </tr>
 <tr>
 <td><code>--zone &lt;Z&gt;</code></td>
-<td>Pin to one zone (AWS and GCP) or data center (Prime Intellect).</td>
+<td>Pin to one zone (AWS and GCP) or data center (Prime Intellect, RunPod).</td>
 </tr>
 <tr>
 <td><code>--image &lt;ID&gt;</code> (alias <code>--ami</code>)</td>
-<td>Machine-image override.</td>
+<td>Machine-image override (container image on RunPod).</td>
 </tr>
 <tr>
 <td><code>--disk &lt;GB&gt;</code></td>
@@ -1240,7 +1436,7 @@ re-run to resume.</p>
 wait, kubeconfig fetch, and validation) and rewrites
 <code>~/.gpu-provisioner/kube/&lt;NAME&gt;.yaml</code>.</p>
 <h2 id="gpuprov-tunnel-name"><code>gpuprov tunnel &lt;NAME&gt;</code><a class="headerlink" href="#gpuprov-tunnel-name" title="Permanent link">&para;</a></h2>
-<p>For clusters on clouds without inbound-port control (Prime Intellect),
+<p>For clusters on clouds without inbound-port control (Massed Compute, Verda, Prime Intellect),
 forwards <code>127.0.0.1:16443</code> to the node's API server. The kubeconfig of such
 clusters already points there. Keep it running while you use <code>kubectl</code>.</p>
 

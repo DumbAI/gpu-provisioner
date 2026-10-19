@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -684,6 +684,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../clouds/massedcompute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Massed Compute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clouds/hyperstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperstack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clouds/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -692,6 +776,62 @@
     
   
     Prime Intellect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clouds/runpod/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunPod
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../clouds/verda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verda
   
 
     
@@ -942,6 +1082,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../development/vendor-stubs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vendor API stubs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../development/acceptance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider acceptance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../development/releasing/" class="md-nav__link">
         
   
@@ -1096,6 +1292,9 @@ gpuprov<span class="w"> </span>down<span class="w"> </span>demo
 <li>AWS: <code>aws configure</code> (or a profile in <code>~/.gpu-provisioner/config.toml</code>).</li>
 <li>GCP: <code>gcloud auth login</code> and <code>gcloud config set project &lt;id&gt;</code>.</li>
 <li>Prime Intellect: <code>prime login</code>, or <code>PRIME_API_KEY</code>.</li>
+<li>RunPod: <code>RUNPOD_API_KEY</code> (or <code>runpod config</code>).</li>
+<li>Verda: <code>VERDA_CLIENT_ID</code> and <code>VERDA_CLIENT_SECRET</code> (Cloud API credentials).</li>
+<li>Massed Compute, Hyperstack, Lambda: <code>MASSED_COMPUTE_API_KEY</code>, <code>HYPERSTACK_API_KEY</code>, <code>LAMBDA_API_KEY</code>.</li>
 </ul>
 </li>
 <li>
@@ -1105,6 +1304,13 @@ gpuprov<span class="w"> </span>provision<span class="w"> </span>--name<span clas
 
 <span class="c1"># GCP: an L4 in any zone of us-central1</span>
 gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>gcp<span class="w"> </span>--name<span class="w"> </span>dev-gcp<span class="w"> </span>--gpus<span class="w"> </span>L4:1<span class="w"> </span>--region<span class="w"> </span>us-central1
+
+<span class="c1"># Budget 48 GB GPU for a session: Massed Compute (US) or Hyperstack (Canada)</span>
+gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>massedcompute<span class="w"> </span>--name<span class="w"> </span>dev-mc<span class="w"> </span>--gpus<span class="w"> </span>A6000:1
+gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>hyperstack<span class="w"> </span>--name<span class="w"> </span>dev-hs<span class="w"> </span>--gpus<span class="w"> </span>A6000:1<span class="w"> </span>--region<span class="w"> </span>CANADA-1
+
+<span class="c1"># RunPod: the cheapest in-stock RTX 4090 pod (pods run as containers: no k3s)</span>
+gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>runpod<span class="w"> </span>--name<span class="w"> </span>dev-rp<span class="w"> </span>--gpus<span class="w"> </span>RTX4090:1
 
 <span class="c1"># Prime Intellect: the cheapest H100 offer anywhere in the marketplace</span>
 gpuprov<span class="w"> </span>provision<span class="w"> </span>--cloud<span class="w"> </span>primeintellect<span class="w"> </span>--name<span class="w"> </span>dev-pi<span class="w"> </span>--gpus<span class="w"> </span>H100:1

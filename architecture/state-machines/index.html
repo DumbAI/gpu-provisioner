@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -593,6 +593,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/massedcompute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Massed Compute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/hyperstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperstack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -601,6 +685,62 @@
     
   
     Prime Intellect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/runpod/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunPod
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/verda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verda
   
 
     
@@ -1027,6 +1167,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../../development/vendor-stubs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vendor API stubs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/acceptance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider acceptance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../development/releasing/" class="md-nav__link">
         
   
@@ -1230,7 +1426,7 @@
 
 <h1 id="provisioning-state-machines-design">Provisioning State Machines — Design<a class="headerlink" href="#provisioning-state-machines-design" title="Permanent link">&para;</a></h1>
 <p><strong>Status:</strong> implemented. This page describes the code in <code>src/machine/</code>, <code>src/vm/</code>, <code>src/cluster/</code>, and <code>src/provider/</code>. Section 1 records the review of the previous design that motivated it.
-<strong>Scope:</strong> the VM lifecycle state machine (launch, teardown), the k3s cluster state machine layered on it, and the provider contract that AWS, Prime Intellect, GCP and the Docker test cloud implement.</p>
+<strong>Scope:</strong> the VM lifecycle state machine (launch, teardown), the k3s cluster state machine layered on it, and the provider contract that every cloud adapter implements (AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect, RunPod, and the Docker test cloud).</p>
 <hr />
 <h2 id="1-review-of-the-previous-design">1. Review of the previous design<a class="headerlink" href="#1-review-of-the-previous-design" title="Permanent link">&para;</a></h2>
 <p>The previous pipeline (<code>orchestrator.rs</code> → <code>failover.rs</code> → <code>CloudProvider</code>) was a readable
@@ -1358,7 +1554,7 @@ attempted:</p>
     machine/          Executor&lt;M: Machine&gt;: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, primeintellect, gcp, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 </code></pre></div>
 <h3 id="41-the-provider-contract-providermodrs">4.1 The provider contract (<code>provider/mod.rs</code>)<a class="headerlink" href="#41-the-provider-contract-providermodrs" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
@@ -1526,79 +1722,108 @@ attempted:</p>
     Ready --&gt; [*]
     Failed --&gt; [*]</code></pre>
 <ul>
-<li><strong>Boot first, SSH as fallback.</strong> On clouds whose capabilities report <code>cloud_init</code>, <code>K3sMachine::new</code> appends the installer to the VM's user data, so k3s installs while the VM boots. The installer serializes on a host-wide <code>flock</code>, records <code>state=running|done|failed</code> in <code>/var/lib/gpuprov/k3s-install.status</code>, and owns <code>/etc/rancher/k3s/config.yaml</code> (re-rendered from a SAN list, restarting k3s only when it changes). <code>CheckingBootInstall</code> reads the marker plus <code>cloud-init status</code>, the k3s unit state, and GPU presence in one SSH round trip. A pure decision table (<code>kube::BootProbe::decide</code>) maps that to <em>installed</em>, <em>wait</em>, or <em>fall back to SSH</em>.</li>
+<li><strong>Boot first, SSH as fallback.</strong> On clouds whose capabilities report <code>boot_script</code>, <code>K3sMachine::new</code> sets the installer as the VM's <code>InstanceSpec::boot_script</code>, a structured script plus env, so k3s installs while the VM boots. Each adapter delivers it natively: AWS and GCP render it into cloud-init (<code>userdata::render</code>), and Verda creates a startup-script resource (<code>BootScript::to_shell</code>). The k3s layer never touches a cloud-specific format. The installer serializes on a host-wide <code>flock</code>, records <code>state=running|done|failed</code> in <code>/var/lib/gpuprov/k3s-install.status</code>, and owns <code>/etc/rancher/k3s/config.yaml</code> (re-rendered from a SAN list, restarting k3s only when it changes). <code>CheckingBootInstall</code> reads the marker plus <code>cloud-init status</code>, the k3s unit state, and GPU presence in one SSH round trip. A pure decision table (<code>kube::BootProbe::decide</code>) maps that to <em>installed</em>, <em>wait</em>, or <em>fall back to SSH</em>.</li>
 <li><strong>TLS SAN.</strong> At boot the installer learns the public IP from the AWS/GCP metadata services. If that fails, <code>Validating</code> sees the API certificate doesn't cover the public host and re-runs the installer once with the SAN.</li>
 <li><strong>Composition.</strong> <code>K3sState::Vm(LaunchState)</code> delegates <code>step</code> to the child machine and lifts its result. A child terminal <code>Ready(vm)</code> becomes <code>CheckingBootInstall { vm }</code>. One journal row per VM name holds the whole nested state.</li>
 <li><strong>Access mode.</strong> <code>Direct</code> (the cloud opens 6443/80/443) or <code>SshTunnel</code> (<code>gpuprov tunnel &lt;name&gt;</code> forwards <code>127.0.0.1:6443</code>). The choice comes from provider capabilities, so k3s works on Prime Intellect.</li>
 <li><strong>Failure policy.</strong> k3s failures leave the VM up (<code>Failed { vm }</code>) for debugging. <code>gpuprov down</code> removes it, and re-running <code>gpuprov provision</code> reuses the VM and re-enters at <code>CheckingBootInstall</code>.</li>
 </ul>
 <h2 id="5-adapters">5. Adapters<a class="headerlink" href="#5-adapters" title="Permanent link">&para;</a></h2>
+<p>Each cloud's page under <a href="../../clouds/">Clouds</a> has the details. This is how
+each one maps onto the primitives:</p>
 <table>
 <thead>
 <tr>
-<th>Primitive</th>
-<th>AWS (EC2)</th>
-<th>Prime Intellect (REST)</th>
-<th>GCP (Compute REST)</th>
-<th>Docker (test cloud)</th>
+<th>Cloud</th>
+<th>plan</th>
+<th>prepare</th>
+<th>create</th>
+<th>observe</th>
+<th>delete / cleanup</th>
+<th>boot script</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>plan</td>
+<td>AWS (EC2)</td>
 <td>static GPU→type ladder × regions</td>
-<td>live <code>GET /availability/gpus</code> → one offer per data center, cheapest first</td>
-<td>static GPU→machine-type ladder × zones that offer the type (live)</td>
-<td>one offer, <code>local</code></td>
-</tr>
-<tr>
-<td>prepare</td>
-<td>type metadata, zones offering it, AMI, default-VPC subnets, per-VM SG</td>
-<td>find-or-register SSH key → <code>sshKeyId</code>; re-validate offer</td>
-<td>per-VM firewall rule (network tag); image family → image</td>
-<td>build the sshd image if missing</td>
-</tr>
-<tr>
-<td>create</td>
+<td>type metadata, offering zones, AMI, default-VPC subnets, per-VM SG</td>
 <td><code>RunInstances</code> (fail-fast client, subnets in order)</td>
-<td><code>POST /pods</code> with offer's cloudId/socket/dc + <code>sshKeyId</code></td>
-<td><code>instances.insert</code> + wait for the zone operation</td>
-<td><code>docker run</code> sshd with <code>authorized_keys</code></td>
-</tr>
-<tr>
-<td>observe</td>
 <td><code>DescribeInstances</code> by tag</td>
-<td><code>GET /pods</code> by name, <code>sshConnection</code> → user/port</td>
+<td><code>TerminateInstances</code> / delete SG</td>
+<td>cloud-init</td>
+</tr>
+<tr>
+<td>GCP (Compute REST)</td>
+<td>static ladder × zones that offer the type (live)</td>
+<td>per-VM firewall rule; image family → image</td>
+<td><code>instances.insert</code> + wait for the zone operation</td>
 <td><code>instances.list</code> by label</td>
-<td><code>docker ps/inspect</code> by label, mapped port</td>
+<td><code>instances.delete</code> / delete firewall rule</td>
+<td>cloud-init</td>
 </tr>
 <tr>
-<td>delete</td>
-<td><code>TerminateInstances</code></td>
-<td><code>DELETE /pods/{id}</code></td>
-<td><code>instances.delete</code></td>
-<td><code>docker rm -f</code></td>
+<td>Massed Compute</td>
+<td>live <code>GET /gpu-inventory</code></td>
+<td>find-or-register SSH key; re-check capacity; pick image</td>
+<td><code>POST /instance/launch</code> (region <code>any</code>)</td>
+<td><code>GET /instance</code> by name</td>
+<td><code>POST /instance/terminate</code> / —</td>
+<td>— (SSH route)</td>
 </tr>
 <tr>
-<td>cleanup</td>
-<td>delete SG</td>
-<td>—</td>
-<td>delete firewall rule</td>
-<td>—</td>
+<td>Hyperstack</td>
+<td>live flavors ⨝ <code>/core/stocks</code> ⨝ <code>/pricebook</code> per region</td>
+<td>re-check stock; find-or-create environment + key pair; pick image</td>
+<td><code>POST /core/virtual-machines</code> with labels, public IP, security rules</td>
+<td>VM list by environment + exact name</td>
+<td><code>DELETE</code> VM / —</td>
+<td>cloud-init</td>
 </tr>
 <tr>
-<td>unsupported</td>
-<td>—</td>
-<td>ports, image, spot</td>
-<td>—</td>
-<td>ports, image, spot, Kubernetes</td>
+<td>Lambda</td>
+<td>live <code>GET /instance-types</code> (capacity per region)</td>
+<td>re-check capacity; find-or-register SSH key; per-VM firewall ruleset when ports are needed</td>
+<td><code>POST /instance-operations/launch</code> with tags + <code>user_data</code></td>
+<td><code>GET /instances</code> by tag</td>
+<td><code>terminate</code> / delete ruleset</td>
+<td>cloud-init</td>
 </tr>
 <tr>
-<td><code>cloud_init</code> (k3s at boot)</td>
-<td>✓</td>
-<td>✗ (SSH route)</td>
-<td>✓</td>
-<td>✗</td>
+<td>Verda (REST v1)</td>
+<td>instance types × per-location availability (spot or on-demand)</td>
+<td>find-or-register SSH key; startup script from the boot script; re-check stock; pick image</td>
+<td><code>POST /v1/instances</code> with tags, OS volume, key, startup script</td>
+<td><code>GET /v1/instances?tag=…</code></td>
+<td><code>delete</code> incl. volumes / tagged volumes + scripts</td>
+<td>startup script</td>
+</tr>
+<tr>
+<td>Prime Intellect (REST)</td>
+<td>live <code>GET /availability/gpus</code>, one offer per data center</td>
+<td>find-or-register SSH key → <code>sshKeyId</code>; re-validate offer</td>
+<td><code>POST /pods</code> with the offer's cloudId/socket/dc + <code>sshKeyId</code></td>
+<td><code>GET /pods</code> by name; <code>sshConnection</code> → user/port</td>
+<td><code>DELETE /pods/{id}</code> / —</td>
+<td>— (SSH route)</td>
+</tr>
+<tr>
+<td>RunPod (REST v2)</td>
+<td>live <code>GET /v2/catalog/gpus?include=AVAILABILITY</code> per tier</td>
+<td>merge account keys (read-only) into <code>PUBLIC_KEY</code>; re-validate stock</td>
+<td><code>POST /v2/pods</code> (GPU id/count, tier, data center, <code>22/tcp</code>)</td>
+<td><code>GET /v2/pods</code> by name; <code>ssh.direct</code></td>
+<td><code>DELETE /v2/pods/{id}</code> / —</td>
+<td>— (no k3s)</td>
+</tr>
+<tr>
+<td>Docker (test cloud)</td>
+<td>one offer, <code>local</code></td>
+<td>build the sshd image if missing</td>
+<td><code>docker run</code> sshd with <code>authorized_keys</code></td>
+<td><code>docker ps/inspect</code> by label</td>
+<td><code>docker rm -f</code> / —</td>
+<td>— (no k3s)</td>
 </tr>
 </tbody>
 </table>
@@ -1606,7 +1831,7 @@ attempted:</p>
 <ul>
 <li><strong>Executor tests:</strong> a toy machine checks persistence, resume after a simulated crash, retry exhaustion, and the cancellation mapping.</li>
 <li><strong>Launch-machine tests:</strong> a scripted <code>FakeProvider</code> covers failover across offers, quota blocking a region, crash between create and journal (adopts the instance and does not create a duplicate), fatal error after create (compensates), and a failed teardown (<code>Leaked</code>, resolved by the next run).</li>
-<li><strong>Adapter tests:</strong> pure classification and parsing tests. HTTP adapters (Prime Intellect, GCP) run against <code>wiremock</code>.</li>
+<li><strong>Adapter tests:</strong> pure classification and parsing tests. HTTP adapters (every cloud except AWS and Docker) run against <code>wiremock</code>.</li>
 <li><strong>Integration (<code>tests/docker_e2e.rs</code>, <code>#[ignore]</code> unless Docker is present):</strong> the <code>docker</code> provider provisions a real sshd container through the full launch machine, runs a command over SSH, re-provisions idempotently, and tears down. Run with <code>cargo test --test docker_e2e -- --ignored</code>.</li>
 </ul>
 

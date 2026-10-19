@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -16,7 +16,7 @@
         <link rel="prev" href="../../architecture/adding-a-cloud/">
       
       
-        <link rel="next" href="../releasing/">
+        <link rel="next" href="../vendor-stubs/">
       
       
         
@@ -593,6 +593,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/massedcompute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Massed Compute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/hyperstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperstack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -601,6 +685,62 @@
     
   
     Prime Intellect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/runpod/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunPod
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/verda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verda
   
 
     
@@ -933,6 +1073,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../vendor-stubs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vendor API stubs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../acceptance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider acceptance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../releasing/" class="md-nav__link">
         
   
@@ -1046,6 +1242,7 @@ cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span
 cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>quota_blocks_every_type_in_the_region<span class="w">   </span><span class="c1"># one test</span>
 cargo<span class="w"> </span>clippy<span class="w"> </span>--all-targets<span class="w"> </span>--<span class="w"> </span>-D<span class="w"> </span>warnings
 cargo<span class="w"> </span>fmt<span class="w"> </span>--check
+cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--test<span class="w"> </span>vendor_stubs<span class="w">   </span><span class="c1"># every cloud adapter against a stateful stub of its API</span>
 cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--test<span class="w"> </span>docker_e2e<span class="w"> </span>--<span class="w"> </span>--ignored<span class="w"> </span>--nocapture<span class="w">   </span><span class="c1"># end-to-end, needs Docker</span>
 </code></pre></div>
 <h2 id="layers">Layers<a class="headerlink" href="#layers" title="Permanent link">&para;</a></h2>
@@ -1067,7 +1264,11 @@ cargo<span class="w"> </span><span class="nb">test</span><span class="w"> </span
 </tr>
 <tr>
 <td>Adapters</td>
-<td>pure parsing and classification tests, plus <code>wiremock</code> HTTP servers for Prime Intellect and GCP</td>
+<td>pure parsing and classification tests, plus <code>wiremock</code> HTTP servers for each HTTP cloud</td>
+</tr>
+<tr>
+<td>Adapters + state machines</td>
+<td><a href="../vendor-stubs/">vendor API stubs</a>: stateful simulations of each vendor's API (moto for AWS), five shared scenarios per vendor</td>
 </tr>
 <tr>
 <td>End to end</td>
@@ -1105,7 +1306,7 @@ machines' 5-second polls and 30-second backoffs cost nothing. Database tests use
 </tr>
 <tr>
 <td><code>.github/workflows/integration.yml</code></td>
-<td>the Docker e2e suite on Linux, with <code>GPUPROV_E2E_REQUIRE_DOCKER=1</code> so a missing daemon fails the job instead of skipping</td>
+<td><code>vendor-stubs</code> (every HTTP cloud adapter against its stub), <code>aws-moto</code> (AWS against the moto emulator, as a service container), and <code>docker-e2e</code> (the Docker e2e suite plus the acceptance-harness self-test, with <code>GPUPROV_E2E_REQUIRE_DOCKER=1</code> so a missing daemon fails the job instead of skipping)</td>
 </tr>
 <tr>
 <td><code>.github/workflows/docs.yml</code></td>
@@ -1169,13 +1370,13 @@ transitions with failure details.</p>
         
         
           
-          <a href="../releasing/" class="md-footer__link md-footer__link--next" aria-label="Next: Releasing">
+          <a href="../vendor-stubs/" class="md-footer__link md-footer__link--next" aria-label="Next: Vendor API stubs">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Releasing
+                Vendor API stubs
               </div>
             </div>
             <div class="md-footer__button md-icon">

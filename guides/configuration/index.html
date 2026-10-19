@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP and Prime Intellect with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -686,6 +686,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/massedcompute/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Massed Compute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/hyperstack/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hyperstack
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/lambda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lambda
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -694,6 +778,62 @@
     
   
     Prime Intellect
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/runpod/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RunPod
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/verda/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verda
   
 
     
@@ -944,6 +1084,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../../development/vendor-stubs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vendor API stubs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/acceptance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Provider acceptance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../development/releasing/" class="md-nav__link">
         
   
@@ -1091,6 +1287,27 @@
 <span class="c1"># team_id = "..."              # bill pods to a team</span>
 <span class="c1"># regions = ["united_states"]  # default region filter (empty = anywhere)</span>
 
+<span class="k">[runpod]</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $RUNPOD_API_KEY, else ~/.runpod/config.toml</span>
+<span class="c1"># regions = ["north_america"]  # continents or ISO country codes (empty = anywhere)</span>
+<span class="c1"># image = "runpod/pytorch:..." # default: runpod/base with CUDA 12.9</span>
+
+<span class="k">[massedcompute]</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $MASSED_COMPUTE_API_KEY</span>
+
+<span class="k">[hyperstack]</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $HYPERSTACK_API_KEY</span>
+<span class="c1"># regions = ["CANADA-1"]       # default: CANADA-1, US-1 (Norway only when asked)</span>
+
+<span class="k">[lambda]</span>
+<span class="n">api_key</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">                </span><span class="c1"># else $LAMBDA_API_KEY</span>
+<span class="c1"># regions = ["us-east-1"]      # default: US regions</span>
+
+<span class="k">[verda]</span>
+<span class="n">client_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">              </span><span class="c1"># else $VERDA_CLIENT_ID</span>
+<span class="n">client_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">          </span><span class="c1"># else $VERDA_CLIENT_SECRET</span>
+<span class="c1"># regions = ["FIN-01"]         # location codes or ISO country codes (empty = anywhere)</span>
+
 <span class="k">[docker]</span>
 <span class="c1"># image = "my/sshd:tag"        # default: built locally from an embedded Dockerfile</span>
 
@@ -1128,6 +1345,26 @@ marketplace".</p>
 <tr>
 <td>Prime Intellect</td>
 <td><code>[primeintellect] api_key</code>, then <code>$PRIME_API_KEY</code>, then the prime CLI's <code>~/.prime/config.json</code></td>
+</tr>
+<tr>
+<td>RunPod</td>
+<td><code>[runpod] api_key</code>, then <code>$RUNPOD_API_KEY</code>, then the runpod CLI's <code>~/.runpod/config.toml</code></td>
+</tr>
+<tr>
+<td>Massed Compute</td>
+<td><code>[massedcompute] api_key</code>, then <code>$MASSED_COMPUTE_API_KEY</code> (create at vm.massedcompute.com → Settings → API)</td>
+</tr>
+<tr>
+<td>Hyperstack</td>
+<td><code>[hyperstack] api_key</code>, then <code>$HYPERSTACK_API_KEY</code></td>
+</tr>
+<tr>
+<td>Lambda</td>
+<td><code>[lambda] api_key</code>, then <code>$LAMBDA_API_KEY</code></td>
+</tr>
+<tr>
+<td>Verda</td>
+<td><code>[verda] client_id</code>/<code>client_secret</code>, then <code>$VERDA_CLIENT_ID</code>/<code>$VERDA_CLIENT_SECRET</code> (exchanged for an OAuth token, refreshed automatically)</td>
 </tr>
 <tr>
 <td>Docker</td>
