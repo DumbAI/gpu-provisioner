@@ -37,6 +37,13 @@
 //! [lambda]
 //! api_key = "..."               # else $LAMBDA_API_KEY
 //!
+//! [nebius]
+//! # token = "..."               # else $NEBIUS_IAM_TOKEN, else `nebius iam get-access-token`
+//! # profile = "prod"            # nebius CLI profile used for the token
+//! # tenant_id = "tenant-..."    # else $NEBIUS_TENANT_ID, else your only tenant
+//! # projects = { eu-north1 = "project-..." }  # pin projects (skips discovery)
+//! # regions = ["eu-north1"]     # default: every region with a project
+//!
 //! [gcp]
 //! project = "my-project"        # else $GOOGLE_CLOUD_PROJECT / gcloud config
 //! # regions = ["us-central1"]   # default failover order
@@ -51,6 +58,7 @@
 //! kubernetes = true             # every VM becomes a k3s node; false to opt out
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -77,6 +85,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub digitalocean: ApiKeyConfig,
     #[serde(default)]
+    pub nebius: NebiusConfig,
+    #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
     pub defaults: Defaults,
@@ -96,6 +106,7 @@ impl AppConfig {
             "hyperstack" => &self.hyperstack.regions,
             "lambda" => &self.lambda.regions,
             "digitalocean" => &self.digitalocean.regions,
+            "nebius" => &self.nebius.regions,
             "docker" => &self.docker.regions,
             _ => &self.defaults.regions,
         }
@@ -191,6 +202,32 @@ pub struct ApiKeyConfig {
     pub base_url: Option<String>,
     /// Default region filter (the cloud's own region names); empty = the
     /// adapter's default (documented per cloud).
+    #[serde(default)]
+    pub regions: Vec<String>,
+}
+
+/// Nebius AI Cloud (REST gateway). Token resolution: `token` here →
+/// `$NEBIUS_IAM_TOKEN` → `nebius [--profile <profile>] iam get-access-token`.
+/// Nebius projects are regional; by default the adapter discovers the
+/// tenant's projects and maps them by region.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NebiusConfig {
+    /// Static IAM access token (valid 12 hours; mostly for CI/testing).
+    pub token: Option<String>,
+    /// `nebius` CLI profile that mints the token (default: the CLI's default).
+    pub profile: Option<String>,
+    /// Tenant whose projects are discovered (else `$NEBIUS_TENANT_ID`, else
+    /// the caller's only tenant). Also scopes the capacity advisor.
+    pub tenant_id: Option<String>,
+    /// Region → project id. When set, these are the only projects used and
+    /// no discovery happens.
+    #[serde(default)]
+    pub projects: BTreeMap<String, String>,
+    /// API base URL override (testing).
+    pub base_url: Option<String>,
+    /// Default region filter (`eu-north1`, `us-central1`, …); empty = every
+    /// region with a project.
     #[serde(default)]
     pub regions: Vec<String>,
 }
@@ -339,6 +376,23 @@ mod tests {
         assert_eq!(cfg.primeintellect.api_key.as_deref(), Some("pk"));
         assert_eq!(cfg.default_regions("primeintellect"), ["canada"]);
         assert_eq!(cfg.default_regions("aws"), ["us-west-2"]);
+    }
+
+    #[test]
+    fn parses_nebius_projects_and_regions() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+            [nebius]
+            profile = "prod"
+            tenant_id = "tenant-e00x"
+            projects = { eu-north1 = "project-e00a", us-central1 = "project-e00b" }
+            regions = ["us-central1"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.nebius.profile.as_deref(), Some("prod"));
+        assert_eq!(cfg.nebius.projects["eu-north1"], "project-e00a");
+        assert_eq!(cfg.default_regions("nebius"), ["us-central1"]);
     }
 
     #[test]

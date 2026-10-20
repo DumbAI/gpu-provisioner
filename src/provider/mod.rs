@@ -17,6 +17,7 @@ pub mod gcp;
 pub mod hyperstack;
 pub mod lambda;
 pub mod massedcompute;
+pub mod nebius;
 pub mod primeintellect;
 pub mod runpod;
 pub mod verda;
@@ -44,6 +45,7 @@ pub const PROVIDER_IDS: &[&str] = &[
     hyperstack::PROVIDER_ID,
     lambda::PROVIDER_ID,
     digitalocean::PROVIDER_ID,
+    nebius::PROVIDER_ID,
     docker::PROVIDER_ID,
 ];
 
@@ -71,6 +73,7 @@ pub async fn build(
         digitalocean::PROVIDER_ID => Ok(Box::new(digitalocean::DigitalOceanProvider::new(
             &config.digitalocean,
         )?)),
+        nebius::PROVIDER_ID => Ok(Box::new(nebius::NebiusProvider::new(&config.nebius)?)),
         docker::PROVIDER_ID => Ok(Box::new(docker::DockerProvider::new(&config.docker))),
         other => Err(ProviderError::invalid(format!(
             "unknown cloud provider '{other}' (available: {})",

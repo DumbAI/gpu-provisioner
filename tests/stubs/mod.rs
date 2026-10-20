@@ -11,6 +11,7 @@ mod gcp;
 mod hyperstack;
 mod lambda;
 mod massedcompute;
+mod nebius;
 mod primeintellect;
 mod runpod;
 mod verda;

@@ -81,6 +81,7 @@ UNKNOWN, not GONE.
 | GCP | preemption of spot/preemptible VMs (with `lastStopTimestamp`), upcoming maintenance windows, shutdowns in progress, status messages |
 | Lambda | `unhealthy` (and since when it was last healthy) and `preempted` |
 | DigitalOcean | powered-off Droplets (which keep billing) |
+| Nebius | preempted (stopped) preemptible VMs, stopped VMs still holding quota and disk, maintenance events |
 | Verda | spot evictions (`discontinued`) and `notfound`, failed installs and `no_capacity`, spot instances |
 | others | existence and normalized status (the default) |
 

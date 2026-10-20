@@ -32,7 +32,7 @@ use gpu_provisioner::vm::teardown::{TeardownMachine, TeardownState};
 #[command(
     name = "gpuprov",
     version,
-    about = "Provision GPU VMs across clouds (AWS, GCP, Lambda, Hyperstack, Massed Compute, DigitalOcean, Verda, RunPod, Prime Intellect) with failover, durable \
+    about = "Provision GPU VMs across clouds (AWS, GCP, Lambda, Hyperstack, Massed Compute, DigitalOcean, Nebius, Verda, RunPod, Prime Intellect) with failover, durable \
              state machines and single-node k3s clusters"
 )]
 struct Cli {
@@ -76,13 +76,13 @@ struct ProvisionArgs {
     /// YAML spec file; flags below override its fields
     #[arg(long, value_name = "FILE")]
     spec: Option<PathBuf>,
-    /// Cloud: aws (default), gcp, massedcompute, hyperstack, lambda, digitalocean, verda,
-    /// primeintellect, runpod, docker
+    /// Cloud: aws (default), gcp, massedcompute, hyperstack, lambda, digitalocean, nebius,
+    /// verda, primeintellect, runpod, docker
     #[arg(long)]
     cloud: Option<String>,
     /// Exact instance type, e.g. g5.xlarge (AWS), g2-standard-8 (GCP),
     /// hyperstack/n3-H100x1 (Prime Intellect), "NVIDIA H100 80GB HBM3" (RunPod), 1H100.80S.22V (Verda), gpu_1x_a6000 (Lambda),
-    /// gpu-6000adax1-48gb (DigitalOcean),
+    /// gpu-6000adax1-48gb (DigitalOcean), gpu-h100-sxm/1gpu-16vcpu-200gb (Nebius),
     /// container (docker)
     #[arg(long, conflicts_with = "gpus")]
     instance_type: Option<String>,

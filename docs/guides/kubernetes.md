@@ -29,7 +29,7 @@ layered on the VM launch machine. The installer can reach the node by two routes
 
 1. **Boot.** On clouds that can run a script at first boot, the installer runs
    while the VM boots, so the install overlaps the wait for SSH. AWS, GCP,
-   Hyperstack, Lambda and DigitalOcean get it through cloud-init user data;
+   Hyperstack, Lambda, DigitalOcean and Nebius get it through cloud-init user data;
    Verda gets it as a startup script.
 2. **SSH.** Once the VM is up, gpuprov checks what the boot run did (one SSH round
    trip: a status marker, `cloud-init status`, the k3s unit, GPU presence):
@@ -70,7 +70,7 @@ command to retry; it reuses the VM and re-checks the install. Or run
 
 | Mode | When | Kubeconfig server | You run |
 |---|---|---|---|
-| Direct | the cloud can open ports (AWS, GCP, Hyperstack, Lambda, DigitalOcean) | `https://<public-ip>:6443` | nothing |
+| Direct | the cloud can open ports (AWS, GCP, Hyperstack, Lambda, DigitalOcean, Nebius) | `https://<public-ip>:6443` | nothing |
 | SSH tunnel | the cloud can't (Massed Compute, Verda, Prime Intellect) | `https://127.0.0.1:16443` | `gpuprov tunnel <name>` in another terminal |
 
 The API certificate covers the public host and always covers `127.0.0.1`. At boot

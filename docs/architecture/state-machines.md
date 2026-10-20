@@ -53,7 +53,7 @@ main.rs ─ CLI: provision / down / status / ssh / kubeconfig / tunnel / list
     machine/          Executor<M: Machine>: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, nebius, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 ```
 
 ### 4.1 The provider contract (`provider/mod.rs`)
@@ -204,6 +204,7 @@ each one maps onto the primitives:
 | Massed Compute | live `GET /gpu-inventory` | find-or-register SSH key; re-check capacity; pick image | `POST /instance/launch` (region `any`) | `GET /instance` by name | `POST /instance/terminate` / — | — (SSH route) |
 | Hyperstack | live flavors ⨝ `/core/stocks` ⨝ `/pricebook` per region | re-check stock; find-or-create environment + key pair; pick image | `POST /core/virtual-machines` with labels, public IP, security rules | VM list by environment + exact name | `DELETE` VM / — | cloud-init |
 | DigitalOcean | live `GET /v2/sizes` × regions where available | find-or-register SSH key; per-VM cloud firewall (by tag); pick the GPU image; re-check availability | `POST /v2/droplets` with tags + `user_data` | `GET /v2/droplets?tag_name=…` | `DELETE /v2/droplets/{id}` / delete firewall | cloud-init |
+| Nebius (REST) | per-project `GET /compute/v1/platforms` × regions; calculator / spot prices; capacity advisor | the project's subnet; image family | `POST /compute/v1/instances` (label, VM-managed boot disk, `cloudInitUserData`) + bounded wait on the operation | `GET /compute/v1/instances` by label | `DELETE /compute/v1/instances/{id}` / — | cloud-init |
 | Lambda | live `GET /instance-types` (capacity per region) | re-check capacity; find-or-register SSH key; per-VM firewall ruleset when ports are needed | `POST /instance-operations/launch` with tags + `user_data` | `GET /instances` by tag | `terminate` / delete ruleset | cloud-init |
 | Verda (REST v1) | instance types × per-location availability (spot or on-demand) | find-or-register SSH key; startup script from the boot script; re-check stock; pick image | `POST /v1/instances` with tags, OS volume, key, startup script | `GET /v1/instances?tag=…` | `delete` incl. volumes / tagged volumes + scripts | startup script |
 | Prime Intellect (REST) | live `GET /availability/gpus`, one offer per data center | find-or-register SSH key → `sshKeyId`; re-validate offer | `POST /pods` with the offer's cloudId/socket/dc + `sshKeyId` | `GET /pods` by name; `sshConnection` → user/port | `DELETE /pods/{id}` / — | — (SSH route) |

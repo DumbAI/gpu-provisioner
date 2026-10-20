@@ -56,6 +56,13 @@ api_key = "..."                # else $DIGITALOCEAN_ACCESS_TOKEN (doctl's variab
 # regions = ["tor1"]           # default: North American regions
 # regions = ["us-east-1"]      # default: US regions
 
+[nebius]
+# token = "..."                # else $NEBIUS_IAM_TOKEN, else `nebius iam get-access-token`
+# profile = "prod"             # nebius CLI profile that mints the token
+# tenant_id = "tenant-..."     # else $NEBIUS_TENANT_ID, else your only tenant
+# projects = { eu-north1 = "project-..." }   # pin projects per region (skips discovery)
+# regions = ["eu-north1"]      # default: every region with a project
+
 [verda]
 client_id = "..."              # else $VERDA_CLIENT_ID
 client_secret = "..."          # else $VERDA_CLIENT_SECRET
@@ -94,5 +101,6 @@ marketplace".
 | Hyperstack | `[hyperstack] api_key`, then `$HYPERSTACK_API_KEY` |
 | Lambda | `[lambda] api_key`, then `$LAMBDA_API_KEY` |
 | DigitalOcean | `[digitalocean] api_key`, then `$DIGITALOCEAN_ACCESS_TOKEN`, then `$DIGITALOCEAN_TOKEN` |
+| Nebius | `[nebius] token`, then `$NEBIUS_IAM_TOKEN`, then `nebius [--profile <profile>] iam get-access-token` (cached for an hour). Tenant: `[nebius] tenant_id`, then `$NEBIUS_TENANT_ID`, then the only tenant visible; projects are discovered per region unless `[nebius] projects` pins them |
 | Verda | `[verda] client_id`/`client_secret`, then `$VERDA_CLIENT_ID`/`$VERDA_CLIENT_SECRET` (exchanged for an OAuth token, refreshed automatically) |
 | Docker | the local Docker daemon (`docker info` must work) |

@@ -17,8 +17,8 @@ resumed.
 |---|---|
 | `--name <NAME>` | VM name: lowercase letters, digits and `-`, up to 40 characters. It also works as `name:` in the spec file. |
 | `--spec <FILE>` | YAML spec file. Flags override its fields. |
-| `--cloud <ID>` | `aws` (default), `gcp`, `massedcompute`, `hyperstack`, `lambda`, `digitalocean`, `verda`, `primeintellect`, `runpod`, or `docker`. |
-| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, `"NVIDIA H100 80GB HBM3"` (RunPod), `1H100.80S.22V` (Verda), `gpu_1x_a6000` (Lambda), `gpu-6000adax1-48gb` (DigitalOcean), `n3-RTX-A6000x1` (Hyperstack), or `container`. Cannot be combined with `--gpus`. |
+| `--cloud <ID>` | `aws` (default), `gcp`, `massedcompute`, `hyperstack`, `lambda`, `digitalocean`, `nebius`, `verda`, `primeintellect`, `runpod`, or `docker`. |
+| `--instance-type <T>` | Exact type: `g5.xlarge`, `g2-standard-8`, `hyperstack/n3-H100x1`, `"NVIDIA H100 80GB HBM3"` (RunPod), `1H100.80S.22V` (Verda), `gpu_1x_a6000` (Lambda), `gpu-6000adax1-48gb` (DigitalOcean), `gpu-h100-sxm/1gpu-16vcpu-200gb` (DigitalOcean), `n3-RTX-A6000x1` (Hyperstack), or `container`. Cannot be combined with `--gpus`. |
 | `--gpus <NAME[:N]>` | GPU shorthand resolved by the cloud's catalog, e.g. `T4:1`, `L4:1`, `A100-80GB:8`, `H100:8`. |
 | `--region <R>` | Candidate region, in failover order. Repeatable. Region names are cloud-specific. |
 | `--zone <Z>` | Pin to one zone (AWS and GCP) or data center (Prime Intellect, RunPod). |
