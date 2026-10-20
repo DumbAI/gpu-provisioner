@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -713,6 +713,34 @@
     
   
     DigitalOcean
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
   
 
     
@@ -1474,6 +1502,13 @@ dropping Lambda's <code>user_data</code> fails the boot-script scenario.</p>
 <td><a href="https://docs.digitalocean.com/reference/api/digitalocean/">API v2</a></td>
 <td><code>422 unprocessable_entity</code> "Size is not available in this region." on create, <code>page</code>/<code>per_page</code> pagination (page size 1), Droplet still listed and <code>locked</code> for one list after delete, firewall referencing a missing tag (<code>422</code>), plus firewall and powered-off-health tests</td>
 <td>capacity status/wording not documented; firewall requires an existing tag</td>
+</tr>
+<tr>
+<td>Nebius</td>
+<td><code>nebius.rs</code></td>
+<td><a href="https://docs.nebius.com/rest-api">REST API</a> (<a href="https://api.nebius.cloud/openapi.json">OpenAPI</a>)</td>
+<td><code>NotEnoughResources</code> in the create operation's status, <code>pageToken</code> pagination (page size 1), <code>STOPPED</code> → <code>STARTING</code> → <code>RUNNING</code> boot, <code>DELETING</code> for one list, duplicate name (<code>409</code>, code 6), preemptible create validation, plus tenant-discovery and spot/preemption tests</td>
+<td>that the create operation finishes before boot and carries capacity failures</td>
 </tr>
 <tr>
 <td>GCP</td>

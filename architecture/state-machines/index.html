@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -713,6 +713,34 @@
     
   
     DigitalOcean
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
   
 
     
@@ -1610,7 +1638,7 @@ attempted:</p>
     machine/          Executor&lt;M: Machine&gt;: persist · retry budget · backoff · poll · deadline · cancel · resume
                       Journal (SQLite `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
-        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
+        provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, nebius, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 </code></pre></div>
 <h3 id="41-the-provider-contract-providermodrs">4.1 The provider contract (<code>provider/mod.rs</code>)<a class="headerlink" href="#41-the-provider-contract-providermodrs" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><span class="cp">#[async_trait]</span>
@@ -1847,6 +1875,15 @@ each one maps onto the primitives:</p>
 <td><code>POST /v2/droplets</code> with tags + <code>user_data</code></td>
 <td><code>GET /v2/droplets?tag_name=…</code></td>
 <td><code>DELETE /v2/droplets/{id}</code> / delete firewall</td>
+<td>cloud-init</td>
+</tr>
+<tr>
+<td>Nebius (REST)</td>
+<td>per-project <code>GET /compute/v1/platforms</code> × regions; calculator / spot prices; capacity advisor</td>
+<td>the project's subnet; image family</td>
+<td><code>POST /compute/v1/instances</code> (label, VM-managed boot disk, <code>cloudInitUserData</code>) + bounded wait on the operation</td>
+<td><code>GET /compute/v1/instances</code> by label</td>
+<td><code>DELETE /compute/v1/instances/{id}</code> / —</td>
 <td>cloud-init</td>
 </tr>
 <tr>

@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -826,6 +826,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -1364,6 +1392,13 @@
 <span class="c1"># regions = ["tor1"]           # default: North American regions</span>
 <span class="c1"># regions = ["us-east-1"]      # default: US regions</span>
 
+<span class="k">[nebius]</span>
+<span class="c1"># token = "..."                # else $NEBIUS_IAM_TOKEN, else `nebius iam get-access-token`</span>
+<span class="c1"># profile = "prod"             # nebius CLI profile that mints the token</span>
+<span class="c1"># tenant_id = "tenant-..."     # else $NEBIUS_TENANT_ID, else your only tenant</span>
+<span class="c1"># projects = { eu-north1 = "project-..." }   # pin projects per region (skips discovery)</span>
+<span class="c1"># regions = ["eu-north1"]      # default: every region with a project</span>
+
 <span class="k">[verda]</span>
 <span class="n">client_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">              </span><span class="c1"># else $VERDA_CLIENT_ID</span>
 <span class="n">client_secret</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"..."</span><span class="w">          </span><span class="c1"># else $VERDA_CLIENT_SECRET</span>
@@ -1426,6 +1461,10 @@ marketplace".</p>
 <tr>
 <td>DigitalOcean</td>
 <td><code>[digitalocean] api_key</code>, then <code>$DIGITALOCEAN_ACCESS_TOKEN</code>, then <code>$DIGITALOCEAN_TOKEN</code></td>
+</tr>
+<tr>
+<td>Nebius</td>
+<td><code>[nebius] token</code>, then <code>$NEBIUS_IAM_TOKEN</code>, then <code>nebius [--profile &lt;profile&gt;] iam get-access-token</code> (cached for an hour). Tenant: <code>[nebius] tenant_id</code>, then <code>$NEBIUS_TENANT_ID</code>, then the only tenant visible; projects are discovered per region unless <code>[nebius] projects</code> pins them</td>
 </tr>
 <tr>
 <td>Verda</td>

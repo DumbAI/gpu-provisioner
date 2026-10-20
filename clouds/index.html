@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -826,6 +826,34 @@
   
   
     <li class="md-nav__item">
+      <a href="nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="primeintellect/" class="md-nav__link">
         
   
@@ -1345,6 +1373,10 @@ adapter only maps a cloud's API onto the contract. Pick one with <code>--cloud &
 <td><code>digitalocean</code></td>
 </tr>
 <tr>
+<td>B300 / B200 / H200 / H100 in Europe and the US, live spot pricing</td>
+<td><code>nebius</code></td>
+</tr>
+<tr>
 <td>European capacity, spot pricing</td>
 <td><code>verda</code></td>
 </tr>
@@ -1421,6 +1453,14 @@ cheapest first.</p>
 <td><code>tor1</code>, <code>nyc2</code>, <code>atl1</code>, …</td>
 <td>North American regions</td>
 <td>live sizes × regions</td>
+</tr>
+<tr>
+<td><a href="nebius/">Nebius</a></td>
+<td><code>nebius</code></td>
+<td>Compute instance (platform + preset)</td>
+<td><code>eu-north1</code>, <code>us-central1</code>, … (one project each)</td>
+<td>every region with a project</td>
+<td>live platforms × projects, calculator / spot prices, capacity advisor</td>
 </tr>
 <tr>
 <td><a href="verda/">Verda</a></td>
@@ -1530,6 +1570,16 @@ cheapest first.</p>
 <td>image slug / id</td>
 <td><code>root</code>@22</td>
 <td>cloud firewall (always: SSH + requested ports) and per-VM tag</td>
+</tr>
+<tr>
+<td>Nebius</td>
+<td>✓ at boot (cloud-init)</td>
+<td>direct</td>
+<td>✓ (default security group allows all traffic)</td>
+<td>✓ preemptible</td>
+<td>image family / id</td>
+<td><code>ubuntu</code>@22</td>
+<td>— (boot disk is VM-managed)</td>
 </tr>
 <tr>
 <td>Verda</td>

@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -870,6 +870,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -1430,11 +1458,11 @@ resumed.</p>
 </tr>
 <tr>
 <td><code>--cloud &lt;ID&gt;</code></td>
-<td><code>aws</code> (default), <code>gcp</code>, <code>massedcompute</code>, <code>hyperstack</code>, <code>lambda</code>, <code>digitalocean</code>, <code>verda</code>, <code>primeintellect</code>, <code>runpod</code>, or <code>docker</code>.</td>
+<td><code>aws</code> (default), <code>gcp</code>, <code>massedcompute</code>, <code>hyperstack</code>, <code>lambda</code>, <code>digitalocean</code>, <code>nebius</code>, <code>verda</code>, <code>primeintellect</code>, <code>runpod</code>, or <code>docker</code>.</td>
 </tr>
 <tr>
 <td><code>--instance-type &lt;T&gt;</code></td>
-<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, <code>"NVIDIA H100 80GB HBM3"</code> (RunPod), <code>1H100.80S.22V</code> (Verda), <code>gpu_1x_a6000</code> (Lambda), <code>gpu-6000adax1-48gb</code> (DigitalOcean), <code>n3-RTX-A6000x1</code> (Hyperstack), or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
+<td>Exact type: <code>g5.xlarge</code>, <code>g2-standard-8</code>, <code>hyperstack/n3-H100x1</code>, <code>"NVIDIA H100 80GB HBM3"</code> (RunPod), <code>1H100.80S.22V</code> (Verda), <code>gpu_1x_a6000</code> (Lambda), <code>gpu-6000adax1-48gb</code> (DigitalOcean), <code>gpu-h100-sxm/1gpu-16vcpu-200gb</code> (DigitalOcean), <code>n3-RTX-A6000x1</code> (Hyperstack), or <code>container</code>. Cannot be combined with <code>--gpus</code>.</td>
 </tr>
 <tr>
 <td><code>--gpus &lt;NAME[:N]&gt;</code></td>

@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -837,6 +837,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -1466,6 +1494,10 @@ UNKNOWN, not GONE.</p>
 <tr>
 <td>DigitalOcean</td>
 <td>powered-off Droplets (which keep billing)</td>
+</tr>
+<tr>
+<td>Nebius</td>
+<td>preempted (stopped) preemptible VMs, stopped VMs still holding quota and disk, maintenance events</td>
 </tr>
 <tr>
 <td>Verda</td>

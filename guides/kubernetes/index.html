@@ -6,7 +6,7 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
+        <meta name="description" content="Provision GPU VMs across AWS, GCP, Massed Compute, Hyperstack, Lambda, DigitalOcean, Nebius, Verda, Prime Intellect and RunPod with failover, durable state machines, SSH, and single-node k3s clusters.">
       
       
       
@@ -815,6 +815,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../clouds/nebius/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Nebius
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../clouds/primeintellect/" class="md-nav__link">
         
   
@@ -1329,7 +1357,7 @@ layered on the VM launch machine. The installer can reach the node by two routes
 <ol>
 <li><strong>Boot.</strong> On clouds that can run a script at first boot, the installer runs
    while the VM boots, so the install overlaps the wait for SSH. AWS, GCP,
-   Hyperstack, Lambda and DigitalOcean get it through cloud-init user data;
+   Hyperstack, Lambda, DigitalOcean and Nebius get it through cloud-init user data;
    Verda gets it as a startup script.</li>
 <li>
 <p><strong>SSH.</strong> Once the VM is up, gpuprov checks what the boot run did (one SSH round
@@ -1397,7 +1425,7 @@ command to retry; it reuses the VM and re-checks the install. Or run
 <tbody>
 <tr>
 <td>Direct</td>
-<td>the cloud can open ports (AWS, GCP, Hyperstack, Lambda, DigitalOcean)</td>
+<td>the cloud can open ports (AWS, GCP, Hyperstack, Lambda, DigitalOcean, Nebius)</td>
 <td><code>https://&lt;public-ip&gt;:6443</code></td>
 <td>nothing</td>
 </tr>
