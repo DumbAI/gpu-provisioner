@@ -125,6 +125,13 @@ pub struct AwsConfig {
     /// Send every EC2/SSM call to this endpoint instead of AWS (an
     /// AWS-compatible emulator such as moto or LocalStack).
     pub endpoint_url: Option<String>,
+    /// IAM instance profile (name or ARN) attached to every instance. Its
+    /// role is the node's AWS identity: with ECR read access
+    /// (`AmazonEC2ContainerRegistryReadOnly`), k3s pulls images from
+    /// private ECR with no stored keys (the installer configures the
+    /// kubelet's ECR credential provider when the node has a role). gpuprov
+    /// never creates IAM resources; the caller needs `iam:PassRole` on it.
+    pub instance_profile: Option<String>,
 }
 
 /// Prime Intellect API access. Key resolution order: `api_key` here →

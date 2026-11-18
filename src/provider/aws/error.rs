@@ -141,6 +141,29 @@ where
     to_provider_error(classify(&err), describe(&err), ErrorKind::Unavailable)
 }
 
+/// `RunInstances` errors. A wrong `[aws] instance_profile` is a
+/// configuration error, the same for every offer: abort with a clear
+/// message instead of failing over through every type and region.
+pub fn at_run_instances<E, R>(err: SdkError<E, R>) -> ProviderError
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+    R: std::fmt::Debug,
+{
+    if is_instance_profile_error(err.code(), err.message().unwrap_or("")) {
+        return ProviderError::invalid(format!(
+            "{} (check [aws] instance_profile: it must exist in this account, and IAM changes take a few seconds to propagate)",
+            describe(&err)
+        ));
+    }
+    at_runtime(err)
+}
+
+/// Whether a RunInstances error is about the IAM instance profile. Pure.
+pub fn is_instance_profile_error(code: Option<&str>, msg: &str) -> bool {
+    code == Some("InvalidParameterValue")
+        && (msg.contains("iamInstanceProfile") || msg.contains("IAM Instance Profile"))
+}
+
 /// `map_err` helper for calls made *after* an instance may exist: an
 /// unclassified failure is `Failed` (triggers compensation).
 pub fn at_runtime<E, R>(err: SdkError<E, R>) -> ProviderError
@@ -185,6 +208,30 @@ mod tests {
             classify_code("InvalidAMIID.Malformed"),
             AwsErrorClass::Other
         );
+    }
+
+    #[test]
+    fn a_wrong_instance_profile_aborts_instead_of_failing_over() {
+        // As EC2 reports a missing or mistyped profile.
+        for msg in [
+            "Value (gpuprov-node) for parameter iamInstanceProfile.name is invalid. Invalid IAM Instance Profile name",
+            "Value (arn:aws:iam::123456789012:instance-profile/x) for parameter iamInstanceProfile.arn is invalid. Invalid IAM Instance Profile ARN",
+        ] {
+            assert!(is_instance_profile_error(Some("InvalidParameterValue"), msg), "{msg}");
+        }
+        // Other parameter errors keep their classification.
+        assert!(!is_instance_profile_error(
+            Some("InvalidParameterValue"),
+            "Value (foo) for parameter instanceType is invalid."
+        ));
+        assert!(!is_instance_profile_error(
+            Some("UnauthorizedOperation"),
+            "not authorized to perform: iam:PassRole on IAM Instance Profile"
+        ));
+        assert!(!is_instance_profile_error(
+            None,
+            "Invalid IAM Instance Profile name"
+        ));
     }
 
     #[test]

@@ -40,6 +40,7 @@ layered on the VM launch machine. The installer can reach the node by two routes
     | boot install still running | wait (up to 15 minutes) |
     | boot install failed, never ran (no cloud-init, reused VM), or still running after 15 min | push the installer over SSH |
     | a GPU the boot run didn't see | push the installer over SSH to add the GPU runtime |
+    | an AWS instance role the last install didn't see | push the installer over SSH to configure ECR pulls |
 
 The two routes never race. The installer takes a host-wide lock, so an SSH run
 waits for a boot run still holding it. The installer is also idempotent: it
@@ -48,7 +49,10 @@ changes.
 
 What the installer does: if `nvidia-smi` works, it installs `nvidia-container-toolkit`
 (unless the image already has it), makes `nvidia` the default containerd runtime,
-and applies the NVIDIA device plugin (pinned `v0.19.3`). Then it installs k3s.
+and applies the NVIDIA device plugin (pinned `v0.19.3`). On AWS, if the instance
+has an IAM role (`[aws] instance_profile`), it also configures the kubelet's ECR
+image credential provider so pods can pull from private ECR with that role
+([details](../clouds/aws.md#pulling-images-from-private-ecr)). Then it installs k3s.
 
 After installing, gpuprov:
 
