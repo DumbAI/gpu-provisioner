@@ -147,6 +147,24 @@ impl<'a> K3sMachine<'a> {
         }
     }
 
+    /// The cluster state for the launch's next state: a ready VM moves on to
+    /// the cluster steps, any other end of the launch ends the cluster, and
+    /// a launch still in flight stays nested. Every path out of the child
+    /// (a step, spent retries, a cancel) goes through here, so a terminal
+    /// launch state is never left nested where it would be stepped again.
+    fn lift(&self, next: LaunchState) -> K3sState {
+        match next {
+            LaunchState::Ready(vm) => K3sState::CheckingBootInstall { vm },
+            next if self.launch.is_terminal(&next) => {
+                let reason = next
+                    .failure_summary()
+                    .unwrap_or_else(|| self.launch.label(&next));
+                K3sState::Failed { vm: None, reason }
+            }
+            next => K3sState::Vm(next),
+        }
+    }
+
     fn failed(&self, vm: &ReadyVm, reason: String) -> K3sState {
         K3sState::Failed {
             vm: Some(vm.clone()),
@@ -280,16 +298,7 @@ impl Machine for K3sMachine<'_> {
     async fn step(&self, s: &K3sState, cx: &StepCx) -> Step<K3sState> {
         match s {
             K3sState::Vm(child) => match self.launch.step(child, cx).await {
-                Step::Next(LaunchState::Ready(vm)) => {
-                    Step::Next(K3sState::CheckingBootInstall { vm })
-                }
-                Step::Next(next) if self.launch.is_terminal(&next) => {
-                    let reason = next
-                        .failure_summary()
-                        .unwrap_or_else(|| self.launch.label(&next));
-                    Step::Next(K3sState::Failed { vm: None, reason })
-                }
-                Step::Next(next) => Step::Next(K3sState::Vm(next)),
+                Step::Next(next) => Step::Next(self.lift(next)),
                 Step::Poll { after, note } => Step::Poll { after, note },
                 Step::Retry { error } => Step::Retry { error },
             },
@@ -359,9 +368,7 @@ impl Machine for K3sMachine<'_> {
 
     fn on_retries_exhausted(&self, s: &K3sState, last_error: String) -> K3sState {
         match s {
-            K3sState::Vm(child) => {
-                K3sState::Vm(self.launch.on_retries_exhausted(child, last_error))
-            }
+            K3sState::Vm(child) => self.lift(self.launch.on_retries_exhausted(child, last_error)),
             K3sState::CheckingBootInstall { vm }
             | K3sState::Installing { vm, .. }
             | K3sState::AwaitingApi { vm }
@@ -375,7 +382,7 @@ impl Machine for K3sMachine<'_> {
     /// during cluster setup the VM is kept and the journal stays resumable.
     fn on_cancel(&self, s: &K3sState) -> Option<K3sState> {
         match s {
-            K3sState::Vm(child) => self.launch.on_cancel(child).map(K3sState::Vm),
+            K3sState::Vm(child) => self.launch.on_cancel(child).map(|next| self.lift(next)),
             _ => None,
         }
     }
@@ -519,6 +526,44 @@ mod tests {
         }
         // One journal row for the whole nested run, kind k3s.
         assert_eq!(db.load_machine("vm1").unwrap().unwrap().kind, "k3s");
+    }
+
+    /// A launch that ends any way but `Ready` ends the cluster, whichever
+    /// path it ends on: a step, spent retries, or a cancel's compensation.
+    /// (Spent retries on a failed teardown used to nest `Vm(Leaked)`, which
+    /// is not terminal for the cluster, and the next step panicked.)
+    #[test]
+    fn a_finished_launch_never_stays_nested() {
+        let (_dir, paths) = paths();
+        let db = Db::open_in_memory().unwrap();
+        let provider = FakeProvider::new(vec![]);
+        let machine = K3sMachine::new(launch(&provider, &db, &paths), &paths);
+        let leaked = LaunchState::Leaked {
+            location: crate::provider::Location {
+                region: "r1".into(),
+                zone: None,
+            },
+            reason: "teardown: unauthorized".into(),
+        };
+        match machine.lift(leaked) {
+            K3sState::Failed { vm: None, reason } => {
+                assert!(reason.contains("unauthorized"), "{reason}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            machine.lift(LaunchState::Planning),
+            K3sState::Vm(LaunchState::Planning)
+        );
+        for state in [
+            K3sState::Vm(LaunchState::Planning),
+            K3sState::Vm(LaunchState::Reconciling),
+        ] {
+            let next = machine.on_retries_exhausted(&state, "unauthorized".into());
+            if let K3sState::Vm(child) = &next {
+                assert!(!child.is_terminal(), "nested terminal {next:?}");
+            }
+        }
     }
 
     #[test]

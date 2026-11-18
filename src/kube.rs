@@ -361,7 +361,8 @@ fn sh(command: impl Into<String>) -> Vec<String> {
     vec![command.into()]
 }
 
-async fn capture(node: &Node<'_>, command: String) -> Result<std::process::Output, KubeError> {
+/// Run `command` through the node's shell, capturing its output.
+pub async fn capture(node: &Node<'_>, command: String) -> Result<std::process::Output, KubeError> {
     runner::run_command_capture(node.user, node.host, &node.opts, &sh(command))
         .await
         .map_err(|e| KubeError::Ssh(e.to_string()))
@@ -492,7 +493,7 @@ fn remove_if_exists(path: &Path) -> std::io::Result<()> {
 }
 
 /// Single-quote for a POSIX shell.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
