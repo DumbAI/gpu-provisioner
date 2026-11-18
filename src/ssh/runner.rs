@@ -47,6 +47,44 @@ pub async fn run_command_capture(
         .await
 }
 
+/// Like [`run_command_capture`], with `input` written to the remote command's
+/// stdin. The way to hand a remote command secret material: unlike an
+/// argument, stdin never shows in the remote process list or in our logs.
+pub async fn run_command_with_input(
+    user: &str,
+    host: &str,
+    opts: &SshOptions,
+    command: &[String],
+    input: &[u8],
+) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncWriteExt;
+    let mut args = ssh_target_args(user, host, opts);
+    args.push(quote_command(command));
+    let mut child = tokio::process::Command::new("ssh")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Write while the output pipes drain, so neither side blocks on a full
+    // pipe; dropping stdin is the remote command's end of input.
+    let write = async move {
+        let result = stdin.write_all(input).await;
+        drop(stdin);
+        result
+    };
+    let (written, output) = tokio::join!(write, child.wait_with_output());
+    let output = output?;
+    // A command that exits without reading all of its input breaks the
+    // pipe; its exit status is the better report.
+    match written {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+        _ => Ok(output),
+    }
+}
+
 /// Replace the current process with an interactive `ssh user@host` session
 /// (full TTY passthrough). Only returns on spawn failure.
 #[cfg(unix)]
@@ -57,20 +95,20 @@ pub fn exec_interactive(user: &str, host: &str, opts: &SshOptions) -> std::io::E
 }
 
 /// Replace this process with a foreground `ssh -N -L` port forward
-/// (`127.0.0.1:<local_port>` → `<remote_port>` on the VM's loopback).
-/// Returns only on spawn failure.
+/// (`127.0.0.1:<local_port>` → `<remote_host>:<remote_port>` as seen from
+/// the VM: its loopback, or a cluster IP). Returns only on spawn failure.
 pub fn exec_forward(
     user: &str,
     host: &str,
     opts: &SshOptions,
     local_port: u16,
-    remote_port: u16,
+    (remote_host, remote_port): (&str, u16),
 ) -> std::io::Error {
     use std::os::unix::process::CommandExt;
     let mut args = vec![
         "-N".to_string(),
         "-L".to_string(),
-        format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+        format!("127.0.0.1:{local_port}:{remote_host}:{remote_port}"),
     ];
     args.extend(ssh_target_args(user, host, opts));
     std::process::Command::new("ssh").args(&args).exec()

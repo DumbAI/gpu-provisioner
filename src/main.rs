@@ -12,15 +12,14 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use gpu_provisioner::cluster::k3s::{K3sMachine, K3sState};
-use gpu_provisioner::config::{AppConfig, DEFAULT_SSH_USER};
+use gpu_provisioner::config::AppConfig;
 use gpu_provisioner::db::{Db, VmRecord, VmState};
 use gpu_provisioner::kube::{self, AccessMode, KubeAccess};
 use gpu_provisioner::machine::{Cancel, Executor};
 use gpu_provisioner::planner;
 use gpu_provisioner::provider;
 use gpu_provisioner::spec::{CliOverrides, VmSpec};
-use gpu_provisioner::ssh::options::SshOptions;
-use gpu_provisioner::ssh::{config_file, keys, runner, wait};
+use gpu_provisioner::ssh::{self, config_file, keys, runner, wait};
 use gpu_provisioner::util::{self, Paths};
 use gpu_provisioner::vm::health::{
     self, CheckStatus, HealthOptions, HealthReport, SystemProbes, Target,
@@ -390,7 +389,11 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
             }
         );
     }
-    let (ip, user, opts) = connection(&record)?;
+    let ssh::Connection {
+        host: ip,
+        user,
+        opts,
+    } = ssh::Connection::for_record(&record)?;
     let opts = opts.control_dir(Some(paths.sockets_dir()));
 
     if args.command.is_empty() {
@@ -406,28 +409,6 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
 fn load_record(db: &Db, name: &str) -> Result<VmRecord> {
     db.get(name)?
         .with_context(|| format!("no VM named '{name}' — see `gpuprov list`"))
-}
-
-/// The SSH connection for a record: `(host, user, options-with-key-and-port)`.
-fn connection(record: &VmRecord) -> Result<(String, String, SshOptions)> {
-    let ip = record
-        .public_ip
-        .clone()
-        .context("record has no public IP; re-run `gpuprov provision`")?;
-    let user = record
-        .ssh_user
-        .clone()
-        .unwrap_or_else(|| DEFAULT_SSH_USER.to_string());
-    let key = record
-        .ssh_key_path
-        .clone()
-        .map(PathBuf::from)
-        .context("record has no SSH key path; re-run `gpuprov provision`")?;
-    Ok((
-        ip,
-        user,
-        SshOptions::new(key).port(record.ssh_port.unwrap_or(22)),
-    ))
 }
 
 /// Re-run the cluster machine from `Installing` for an existing VM: the
@@ -488,13 +469,23 @@ fn tunnel(name: &str, paths: &Paths) -> Result<()> {
     if record.state != VmState::Up {
         bail!("VM '{name}' is {}, not UP", record.state);
     }
-    let (ip, user, opts) = connection(&record)?;
+    let ssh::Connection {
+        host: ip,
+        user,
+        opts,
+    } = ssh::Connection::for_record(&record)?;
     eprintln!(
         "forwarding 127.0.0.1:{} → {name}:{} (Ctrl-C to stop)",
         kube::TUNNEL_LOCAL_PORT,
         kube::API_PORT
     );
-    let err = runner::exec_forward(&user, &ip, &opts, kube::TUNNEL_LOCAL_PORT, kube::API_PORT);
+    let err = runner::exec_forward(
+        &user,
+        &ip,
+        &opts,
+        kube::TUNNEL_LOCAL_PORT,
+        ("127.0.0.1", kube::API_PORT),
+    );
     bail!("failed to exec ssh: {err}")
 }
 
