@@ -2,9 +2,10 @@
 //! wait/retry loops, which the shared launch/teardown machines own.
 
 use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, HttpTokensState, Instance, InstanceMarketOptionsRequest,
-    InstanceMetadataOptionsRequest, InstanceNetworkInterfaceSpecification, InstanceStateName,
-    InstanceType, MarketType, ResourceType, Tag, TagSpecification, VolumeType,
+    BlockDeviceMapping, EbsBlockDevice, HttpTokensState, IamInstanceProfileSpecification, Instance,
+    InstanceMarketOptionsRequest, InstanceMetadataOptionsRequest,
+    InstanceNetworkInterfaceSpecification, InstanceStateName, InstanceType, MarketType,
+    ResourceType, Tag, TagSpecification, VolumeType,
 };
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -37,10 +38,20 @@ pub async fn create(
     offer: &Offer,
     prepared: &Bootstrapped,
     spec: &InstanceSpec,
+    instance_profile: Option<&str>,
 ) -> Result<String, ProviderError> {
     let mut last_err: Option<ProviderError> = None;
     for subnet in &prepared.subnets {
-        match run_instance(ec2_fail_fast, offer, prepared, spec, &subnet.subnet_id).await {
+        match run_instance(
+            ec2_fail_fast,
+            offer,
+            prepared,
+            spec,
+            &subnet.subnet_id,
+            instance_profile,
+        )
+        .await
+        {
             Ok(instance_id) => {
                 tracing::info!(
                     "[{}] launched instance {instance_id} in {}",
@@ -73,6 +84,7 @@ async fn run_instance(
     prepared: &Bootstrapped,
     spec: &InstanceSpec,
     subnet_id: &str,
+    instance_profile: Option<&str>,
 ) -> Result<String, ProviderError> {
     let mut call = ec2_fail_fast
         .run_instances()
@@ -108,7 +120,8 @@ async fn run_instance(
                 .build(),
         )
         .tag_specifications(instance_tags(&spec.vm_name))
-        .user_data(BASE64.encode(userdata::render(spec).as_bytes()));
+        .user_data(BASE64.encode(userdata::render(spec).as_bytes()))
+        .set_iam_instance_profile(instance_profile.map(instance_profile_spec));
     if spec.spot {
         call = call.instance_market_options(
             InstanceMarketOptionsRequest::builder()
@@ -116,12 +129,22 @@ async fn run_instance(
                 .build(),
         );
     }
-    let resp = call.send().await.map_err(error::at_runtime)?;
+    let resp = call.send().await.map_err(error::at_run_instances)?;
     resp.instances()
         .first()
         .and_then(|i| i.instance_id())
         .map(str::to_string)
         .ok_or_else(|| ProviderError::failed("RunInstances succeeded but returned no instance"))
+}
+
+/// `[aws] instance_profile` as RunInstances takes it: an ARN, or a name.
+fn instance_profile_spec(profile: &str) -> IamInstanceProfileSpecification {
+    let builder = IamInstanceProfileSpecification::builder();
+    if profile.starts_with("arn:") {
+        builder.arn(profile).build()
+    } else {
+        builder.name(profile).build()
+    }
 }
 
 fn instance_tags(vm_name: &str) -> TagSpecification {
@@ -260,4 +283,20 @@ pub async fn delete_security_group(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_instance_profile_is_a_name_or_an_arn() {
+        let by_name = instance_profile_spec("gpuprov-node");
+        assert_eq!(by_name.name(), Some("gpuprov-node"));
+        assert_eq!(by_name.arn(), None);
+        let arn = "arn:aws:iam::123456789012:instance-profile/gpuprov-node";
+        let by_arn = instance_profile_spec(arn);
+        assert_eq!(by_arn.arn(), Some(arn));
+        assert_eq!(by_arn.name(), None);
+    }
 }

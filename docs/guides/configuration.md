@@ -24,6 +24,7 @@ profile = "default"            # or explicit static credentials:
 # access_key_id = "..."
 # secret_access_key = "..."
 # session_token = "..."        # optional
+# instance_profile = "gpuprov-node"   # the VM's IAM role: k3s pulls from private ECR with it
 
 [gcp]
 project = "my-project"         # else $GOOGLE_CLOUD_PROJECT / gcloud config

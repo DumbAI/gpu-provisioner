@@ -42,6 +42,8 @@ pub(crate) fn filter_values<'a>(name: &str, values: impl IntoIterator<Item = &'a
 
 pub struct AwsProvider {
     base: aws_config::SdkConfig,
+    /// `[aws] instance_profile`: attached to every instance created.
+    instance_profile: Option<String>,
     clients: Mutex<HashMap<String, RegionClients>>,
 }
 
@@ -78,6 +80,7 @@ impl AwsProvider {
         let base = loader.load().await;
         Self {
             base,
+            instance_profile: cfg.instance_profile.clone(),
             clients: Mutex::new(HashMap::new()),
         }
     }
@@ -155,6 +158,7 @@ impl CloudProvider for AwsProvider {
             offer,
             &prepared,
             spec,
+            self.instance_profile.as_deref(),
         )
         .await
     }

@@ -41,6 +41,12 @@ pub const TUNNEL_LOCAL_PORT: u16 = 16443;
 /// - `GPUPROV_TLS_SAN` — host clients use for the API; when empty (boot
 ///   route) the public IP is looked up from the AWS / GCP metadata services.
 ///
+/// On AWS, when the instance has an IAM role (`[aws] instance_profile`), the
+/// kubelet's ECR image credential provider is configured, so images in
+/// private ECR are pulled with the role: no stored keys, nothing expires.
+/// The provider binary is pinned ([`ECR_CREDENTIAL_PROVIDER_VERSION`]) and
+/// checked against its published SHA-256.
+///
 /// GPU is detected via `nvidia-smi`, so one script serves CPU and GPU nodes.
 /// Images that ship the NVIDIA driver and toolkit (AWS Deep Learning AMI,
 /// GCP Deep Learning VM, CUDA marketplace images) need nothing extra. The
@@ -67,15 +73,20 @@ echo "state=running origin=$ORIGIN gpu=$GPU" > "$STATUS"
 trap 'rc=$?; if [ $rc -ne 0 ]; then echo "state=failed origin=$ORIGIN gpu=$GPU exit=$rc" > "$STATUS"; fi' EXIT
 set -x
 
+# --- AWS instance metadata (IMDSv2); empty everywhere else -----------------
+IMDS_TOKEN=$(curl -sS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
+case "$IMDS_TOKEN" in *[!A-Za-z0-9+/=_-]*) IMDS_TOKEN="";; esac   # not AWS: an error page
+imds() {
+  [ -n "$IMDS_TOKEN" ] || return 0
+  curl -sSf -m 2 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+    "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true
+}
+
 # --- TLS SAN: the caller's host, else the public IP from cloud metadata ----
 SAN="${GPUPROV_TLS_SAN:-}"
 if [ -z "$SAN" ]; then
-  TOKEN=$(curl -sS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
-    -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || true)
-  if [ -n "$TOKEN" ]; then
-    SAN=$(curl -sS -m 2 -H "X-aws-ec2-metadata-token: $TOKEN" \
-      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
-  fi
+  SAN=$(imds public-ipv4)
 fi
 if [ -z "$SAN" ]; then
   SAN=$(curl -sS -m 2 -H "Metadata-Flavor: Google" \
@@ -104,6 +115,51 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
 fi
 echo "$GPU" > "$GPU_FLAG"
 
+# --- AWS: pull from private ECR with the instance's role -------------------
+# Only when the instance has an IAM role: the kubelet's image credential
+# provider exchanges it for short-lived ECR tokens on each pull. The binary is
+# pinned and must match its published SHA-256 (a mismatch fails the install).
+ECP_VERSION=v1.37.1
+CP_DIR=/var/lib/rancher/credentialprovider
+ECR=0
+ROLE=$(imds iam/security-credentials/)
+case "$ROLE" in *[!A-Za-z0-9+=,.@_-]*) ROLE="";; esac
+if [ -n "$ROLE" ]; then
+  case "$(uname -m)" in
+    x86_64)  ECP_ARCH=amd64; ECP_SHA=f05b9d72cfd73782e75943d746172cbad5bc89a0e42b0cd98b784565f1bfe33e ;;
+    aarch64) ECP_ARCH=arm64; ECP_SHA=594994e2369af0b0c860b8cbf4c00ed77f6eed5e3789a188b40d71a016b4191a ;;
+    *)       ECP_ARCH="" ;;
+  esac
+  if [ -n "$ECP_ARCH" ]; then
+    mkdir -p "$CP_DIR/bin"
+    BIN="$CP_DIR/bin/ecr-credential-provider"
+    if ! echo "$ECP_SHA  $BIN" | sha256sum -c --status 2>/dev/null; then
+      log "instance role $ROLE: installing ecr-credential-provider $ECP_VERSION"
+      curl -fsSL --retry 3 -o "$BIN.new" \
+        "https://artifacts.k8s.io/binaries/cloud-provider-aws/$ECP_VERSION/linux/$ECP_ARCH/ecr-credential-provider-linux-$ECP_ARCH"
+      echo "$ECP_SHA  $BIN.new" | sha256sum -c --status
+      chmod 0755 "$BIN.new"
+      mv "$BIN.new" "$BIN"
+    fi
+    # The provider's name must be the binary's name.
+    cat > "$CP_DIR/config.yaml" <<'YAML'
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: ecr-credential-provider
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+    defaultCacheDuration: 12h
+    matchImages:
+      - "*.dkr.ecr.*.amazonaws.com"
+      - "*.dkr.ecr.*.amazonaws.com.cn"
+      - "*.dkr.ecr-fips.*.amazonaws.com"
+YAML
+    ECR=1
+  else
+    log "instance role $ROLE, but no ecr-credential-provider build for $(uname -m)"
+  fi
+fi
+
 # --- Render the k3s config we own; note whether it changed ------------------
 {
   echo 'write-kubeconfig-mode: "0644"'
@@ -112,6 +168,13 @@ echo "$GPU" > "$GPU_FLAG"
   if [ -s "$SANS" ]; then
     echo 'tls-san:'
     while IFS= read -r s; do [ -n "$s" ] && echo "  - \"$s\""; done < "$SANS"
+  fi
+  if [ "$ECR" = "1" ]; then
+    # The version is part of the config, so a new provider restarts k3s.
+    echo '# ecr-credential-provider '"$ECP_VERSION"
+    echo 'kubelet-arg:'
+    echo "  - \"image-credential-provider-config=$CP_DIR/config.yaml\""
+    echo "  - \"image-credential-provider-bin-dir=$CP_DIR/bin\""
   fi
 } > "$CONF.new"
 CHANGED=1
@@ -140,9 +203,13 @@ if [ "$GPU" = "1" ]; then
   /usr/local/bin/k3s kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.19.3/deployments/static/nvidia-device-plugin.yml
 fi
 
-echo "state=done origin=$ORIGIN gpu=$GPU" > "$STATUS"
+echo "state=done origin=$ORIGIN gpu=$GPU ecr=$ECR" > "$STATUS"
 log "k3s install complete"
 "#;
+
+/// The pinned `ecr-credential-provider` release the installer uses on AWS
+/// nodes with an instance role (artifacts.k8s.io, cloud-provider-aws).
+pub const ECR_CREDENTIAL_PROVIDER_VERSION: &str = "v1.37.1";
 
 /// Reports what a boot-route install did, in ONE SSH round trip (parsed by
 /// [`BootProbe::parse`]).
@@ -154,6 +221,10 @@ else
 fi
 echo "k3s_active=$(systemctl is-active k3s 2>/dev/null)"
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then echo "gpu_present=1"; else echo "gpu_present=0"; fi
+T=$(curl -sS -m 2 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
+R=""
+case "$T" in ""|*[!A-Za-z0-9+/=_-]*) ;; *) R=$(curl -sSf -m 2 -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null || true) ;; esac
+case "$R" in ""|*[!A-Za-z0-9+=,.@_-]*) echo "aws_role=0" ;; *) echo "aws_role=1" ;; esac
 "#;
 
 /// Prints `key=value` lines describing cluster health in ONE SSH round trip.
@@ -280,6 +351,10 @@ pub struct BootProbe {
     pub marker_state: Option<String>,
     /// Whether the marker's run detected a GPU.
     pub marker_gpu: bool,
+    /// Whether the marker's run configured ECR pulls (an AWS instance role).
+    pub marker_ecr: bool,
+    /// Whether the instance has an AWS IAM role now.
+    pub aws_role: bool,
     /// `cloud-init status` (`running`, `done`, `error`, …) or `absent`.
     pub cloud_init: String,
     pub k3s_active: bool,
@@ -314,6 +389,7 @@ impl BootProbe {
                                 probe.marker_state = Some(state.to_string())
                             }
                             Some(("gpu", gpu)) => probe.marker_gpu = gpu == "1",
+                            Some(("ecr", ecr)) => probe.marker_ecr = ecr == "1",
                             _ => {}
                         }
                     }
@@ -327,6 +403,7 @@ impl BootProbe {
                 }
                 "k3s_active" => probe.k3s_active = value == "active",
                 "gpu_present" => probe.gpu_present = value == "1",
+                "aws_role" => probe.aws_role = value == "1",
                 _ => {}
             }
         }
@@ -341,6 +418,9 @@ impl BootProbe {
             }
             Some("done") if self.gpu_present && !self.marker_gpu => BootDecision::Fallback(
                 "GPU appeared after the boot install; GPU runtime not configured".into(),
+            ),
+            Some("done") if self.aws_role && !self.marker_ecr => BootDecision::Fallback(
+                "instance role attached after the install; ECR pulls not configured".into(),
             ),
             Some("done") => BootDecision::Installed,
             Some("running") => BootDecision::Wait("boot install in progress".into()),
@@ -718,6 +798,41 @@ users:
     /// `bash -n` every embedded script: a syntax error must fail the test
     /// suite, not a VM's boot.
     #[test]
+    fn ecr_pulls_are_configured_only_for_a_node_with_an_instance_role() {
+        let script = K3S_INSTALL_SCRIPT;
+        // Gated on the role the instance metadata reports.
+        assert!(script.contains("ROLE=$(imds iam/security-credentials/)"));
+        assert!(script.contains(r#"if [ -n "$ROLE" ]; then"#));
+        // Pinned to the version the constant names, verified by checksum.
+        assert!(script.contains(&format!("ECP_VERSION={ECR_CREDENTIAL_PROVIDER_VERSION}")));
+        for arch in ["amd64", "arm64"] {
+            let line = script
+                .lines()
+                .find(|l| l.contains(&format!("ECP_ARCH={arch};")))
+                .unwrap_or_else(|| panic!("no {arch} build pinned"));
+            let sha = line
+                .split("ECP_SHA=")
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap();
+            assert_eq!(sha.len(), 64, "{arch}: {sha}");
+            assert!(sha
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        }
+        assert!(script.contains(r#"sha256sum -c --status"#));
+        // The kubelet runs the provider named like the binary.
+        assert!(script.contains("- name: ecr-credential-provider"));
+        assert!(script.contains(r#"BIN="$CP_DIR/bin/ecr-credential-provider""#));
+        // And is pointed at both, in the k3s config the script owns.
+        assert!(script.contains("image-credential-provider-config=$CP_DIR/config.yaml"));
+        assert!(script.contains("image-credential-provider-bin-dir=$CP_DIR/bin"));
+        assert!(script.contains("*.dkr.ecr.*.amazonaws.com"));
+    }
+
+    #[test]
     fn embedded_scripts_parse_as_bash() {
         for (name, script) in [
             ("install", K3S_INSTALL_SCRIPT),
@@ -757,6 +872,12 @@ users:
     fn boot_decision_table() {
         let installed = probe("marker=state=done,gpu=0\nk3s_active=active\ngpu_present=0\n");
         assert_eq!(installed.decide(), BootDecision::Installed);
+        // A role, already configured: nothing to do. No role: ECR is not needed.
+        let with_ecr = probe("marker=state=done,gpu=0,ecr=1\nk3s_active=active\naws_role=1\n");
+        assert_eq!(with_ecr.decide(), BootDecision::Installed);
+        assert!(with_ecr.marker_ecr && with_ecr.aws_role);
+        let no_role = probe("marker=state=done,gpu=0,ecr=0\nk3s_active=active\naws_role=0\n");
+        assert_eq!(no_role.decide(), BootDecision::Installed);
 
         let running = probe("marker=state=running\ncloud_init=running\n");
         assert!(matches!(running.decide(), BootDecision::Wait(_)));
@@ -771,6 +892,8 @@ users:
             "marker=\ncloud_init=absent\n",                   // cloud without cloud-init
             "marker=state=done,gpu=0\nk3s_active=failed\n",   // installed but dead
             "marker=state=done,gpu=0\nk3s_active=active\ngpu_present=1\n", // GPU missed at boot
+            "marker=state=done,gpu=0,ecr=0\nk3s_active=active\naws_role=1\n", // role attached later
+            "marker=state=done,gpu=0\nk3s_active=active\naws_role=1\n", // install predates ECR support
         ] {
             assert!(
                 matches!(probe(fallback).decide(), BootDecision::Fallback(_)),
