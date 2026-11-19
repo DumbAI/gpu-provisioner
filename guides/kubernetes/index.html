@@ -1386,6 +1386,10 @@ layered on the VM launch machine. The installer can reach the node by two routes
 <td>a GPU the boot run didn't see</td>
 <td>push the installer over SSH to add the GPU runtime</td>
 </tr>
+<tr>
+<td>an AWS instance role the last install didn't see</td>
+<td>push the installer over SSH to configure ECR pulls</td>
+</tr>
 </tbody>
 </table>
 </li>
@@ -1396,7 +1400,10 @@ writes <code>/etc/rancher/k3s/config.yaml</code> itself and restarts k3s only wh
 changes.</p>
 <p>What the installer does: if <code>nvidia-smi</code> works, it installs <code>nvidia-container-toolkit</code>
 (unless the image already has it), makes <code>nvidia</code> the default containerd runtime,
-and applies the NVIDIA device plugin (pinned <code>v0.19.3</code>). Then it installs k3s.</p>
+and applies the NVIDIA device plugin (pinned <code>v0.19.3</code>). On AWS, if the instance
+has an IAM role (<code>[aws] instance_profile</code>), it also configures the kubelet's ECR
+image credential provider so pods can pull from private ECR with that role
+(<a href="../../clouds/aws/#pulling-images-from-private-ecr">details</a>). Then it installs k3s.</p>
 <p>After installing, gpuprov:</p>
 <ol>
 <li><strong>waits for the API</strong> (<code>/readyz</code>, up to 10 minutes);</li>

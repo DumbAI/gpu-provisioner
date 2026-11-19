@@ -681,6 +681,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#pulling-images-from-private-ecr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pulling images from private ECR
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1344,6 +1355,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#pulling-images-from-private-ecr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pulling images from private ECR
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1477,9 +1499,14 @@ the required size.</p>
 <td>retry with backoff</td>
 </tr>
 <tr>
-<td><code>AuthFailure</code>, <code>ExpiredToken</code>, …</td>
+<td><code>AuthFailure</code>, <code>ExpiredToken</code>, <code>UnauthorizedOperation</code> (incl. a missing <code>iam:PassRole</code>), …</td>
 <td>Credentials</td>
 <td>abort (after compensating)</td>
+</tr>
+<tr>
+<td><code>InvalidParameterValue</code> about the IAM instance profile</td>
+<td>InvalidRequest</td>
+<td>abort: a wrong <code>instance_profile</code> fails the same way everywhere</td>
 </tr>
 </tbody>
 </table>
@@ -1487,7 +1514,39 @@ the required size.</p>
 <p>The caller needs <code>ec2:Describe*</code>, <code>ec2:RunInstances</code>, <code>ec2:TerminateInstances</code>,
 <code>ec2:CreateTags</code>, <code>ec2:CreateSecurityGroup</code>, <code>ec2:DeleteSecurityGroup</code>,
 <code>ec2:AuthorizeSecurityGroupIngress</code>, and <code>ssm:GetParameter</code> (public AMI
-parameters). The VM itself gets <strong>no</strong> IAM role.</p>
+parameters). The VM itself gets <strong>no</strong> IAM role unless <code>[aws] instance_profile</code>
+names one.</p>
+<h2 id="pulling-images-from-private-ecr">Pulling images from private ECR<a class="headerlink" href="#pulling-images-from-private-ecr" title="Permanent link">&para;</a></h2>
+<p>A k3s node has no AWS credentials, so a pod whose image is in private ECR fails
+with <code>no basic auth credentials</code>. Give the VM a role instead of keys:</p>
+<ol>
+<li>
+<p>Once per account, create a role EC2 can assume, with ECR read access, and an
+   instance profile for it:</p>
+<div class="highlight"><pre><span></span><code>aws<span class="w"> </span>iam<span class="w"> </span>create-role<span class="w"> </span>--role-name<span class="w"> </span>gpuprov-node<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--assume-role-policy-document<span class="w"> </span><span class="s1">'{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'</span>
+aws<span class="w"> </span>iam<span class="w"> </span>attach-role-policy<span class="w"> </span>--role-name<span class="w"> </span>gpuprov-node<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--policy-arn<span class="w"> </span>arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+aws<span class="w"> </span>iam<span class="w"> </span>create-instance-profile<span class="w"> </span>--instance-profile-name<span class="w"> </span>gpuprov-node
+aws<span class="w"> </span>iam<span class="w"> </span>add-role-to-instance-profile<span class="w"> </span>--instance-profile-name<span class="w"> </span>gpuprov-node<span class="w"> </span>--role-name<span class="w"> </span>gpuprov-node
+</code></pre></div>
+</li>
+<li>
+<p>Name it in the config: <code>[aws] instance_profile = "gpuprov-node"</code> (a name or an
+   ARN). Every instance gpuprov creates gets it. The caller also needs
+   <code>iam:PassRole</code> on the role.</p>
+</li>
+</ol>
+<p>The k3s installer sees the role in the instance metadata and configures the
+kubelet's <strong>ECR image credential provider</strong> (<code>ecr-credential-provider</code>, pinned
+<code>v1.37.1</code>, verified by SHA-256): on every pull from <code>*.dkr.ecr.*.amazonaws.com</code>,
+the kubelet trades the role for a short-lived ECR token. No keys are stored on
+the node and nothing needs refreshing. A node without a role is configured
+exactly as before.</p>
+<p>gpuprov never creates IAM resources: roles are account policy, often owned by
+someone else. An existing VM gets the role with
+<code>aws ec2 associate-iam-instance-profile</code>; re-running <code>provision</code> then reruns the
+installer, which adds the credential provider and restarts k3s.</p>
 
 
 
