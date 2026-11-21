@@ -53,6 +53,7 @@ nav:
       - Configuration: guides/configuration.md
       - Kubernetes (k3s): guides/kubernetes.md
       - Health checks: guides/health.md
+      - Embedding gpuprov: guides/library.md
   - Clouds:
       - Overview: clouds/index.md
       - AWS: clouds/aws.md

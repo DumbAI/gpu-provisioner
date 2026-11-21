@@ -41,6 +41,8 @@ attempted:
 | k3s installer delivery | cloud-init at boot only · SSH push after `Ready` only · **boot first, verified over SSH, SSH push as fallback** | Boot delivery overlaps the install with the SSH wait (about 1–2 minutes faster) but is unobservable and exists only on cloud-init clouds. SSH push works everywhere and is retryable, but is serial. The hybrid gets both: `CheckingBootInstall` reads the installer's status marker and pushes over SSH only when the boot route is missing (no cloud-init, reused VM), failed, or ran too long. A host-wide lock and an idempotent installer make the two routes safe to overlap. |
 | k3s by default | opt-in `--k8s` · **on by default, opt out with `--no-k8s` / `[defaults] kubernetes = false`** | Every VM is a ready cluster. The default is skipped, with a note, on clouds that cannot host k3s (`Feature::Kubernetes` unsupported, e.g. Docker); an explicit `--k8s` there is rejected up front. |
 | k3s API access | Always public `:6443` · **`Direct` when the cloud can open ports, else `SshTunnel`** | Makes k3s portable to clouds without a firewall API. Validation checks the access path the user will actually use. |
+| Where the state lives | local SQLite only · an external durable-execution engine · **a `StateStore` trait: SQLite for the CLI, Postgres for embedders** | The CLI keeps the no-server wedge. An embedder (a workflow worker) must survive losing its disk mid-launch, or it could orphan paid VMs; Postgres gives it shared, durable state without changing the machines. A trait object rather than an enum: the machines need a dozen operations, each backend keeps its own connection and error handling, and the virtual call is noise next to a round trip. |
+| Lease identity and safety | pid + read-then-write · **per-run owner token, atomic upsert, database clock, fenced writes** | Pids collide across hosts and a read-then-write races. Fencing makes takeover safe even when the old owner is merely slow rather than dead. |
 | Projection vs source of truth | One table · **`machines` (journal, source of truth) + `vms` (user-facing projection)** | The generic executor must not know VM columns. `vms` is updated idempotently by steps and can always be recomputed. |
 
 ## 4. Architecture
@@ -51,7 +53,7 @@ main.rs ─ CLI: provision / down / status / ssh / kubeconfig / tunnel / list
   vm/launch.rs        LaunchMachine  = Reconcile → Plan → [Prepare → Create → Boot → Connect]* → Ready
   vm/teardown.rs      TeardownMachine= Request → AwaitGone → Cleanup → Done   (also the compensation sub-machine)
     machine/          Executor<M: Machine>: persist · retry budget · backoff · poll · deadline · cancel · resume
-                      Journal (SQLite `machines` + `machine_events`)
+                      Journal (`db::StateStore`: SQLite or Postgres `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
         provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, nebius, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 ```
@@ -129,6 +131,9 @@ Executor invariants:
 3. **Budgets.** Consecutive `Retry`s in one state are capped (`RetryPolicy { max_attempts, initial_backoff, max_backoff }`). On exhaustion the machine names the failure state; the executor never invents one. `Poll` deadlines are enforced *by the machine* using `cx.in_state` (time since entering the state in this process), so a resume gets a fresh but bounded window.
 4. **Cancellation at step boundaries only.** Ctrl-C never drops an in-flight cloud call (that would lose the handle). Between steps, `on_cancel` maps the state to a compensating state (for example `Booting` → `Compensating`). The machine then runs to a terminal state, and a second Ctrl-C exits immediately and leaves the journal resumable.
 5. **Resume.** `Executor::run` loads the journalled state for the key. If it is non-terminal, execution continues from it; otherwise the caller supplies a fresh initial state.
+6. **One fenced writer.** Each `Executor` takes the key's lease under its own `LeaseOwner` (host, pid, random token) in one atomic statement: granted when unleased, already its own, terminal, or stale (no heartbeat for `LEASE_STALE_SECS` = 60 s by the store's clock), else `Busy`. It heartbeats every 20 s during steps and polls. Journal writes and heartbeats succeed only while it still owns the lease; otherwise they fail with `LeaseLost` and the run stops immediately, so a run that stalled and was taken over never writes again. The successor resumes from the journal and, by invariant 2, observes before acting.
+
+The store behind the journal is the `db::StateStore` trait (async, shared as `&dyn StateStore`). `SqliteStore` is the CLI's local file; `PgStore` keeps the same tables in a `gpuprov` Postgres schema for embedders whose hosts have no durable disk or who run several workers. Both implement the same lease and fencing statements; one contract test suite (`db/tests.rs`) runs against each.
 
 ### 4.3 VM launch machine (`vm/launch.rs`)
 

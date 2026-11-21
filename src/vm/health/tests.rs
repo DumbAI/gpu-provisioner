@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use super::*;
-use crate::db::UpFields;
+use crate::db::{SqliteStore, UpFields};
 use crate::provider::fake::FakeProvider;
 use crate::provider::{
     Capabilities, Diagnosis, Finding, InstanceSpec, Observed, Offer, ProviderError, ResourceRequest,
@@ -124,8 +124,9 @@ impl CloudProvider for WithFindings {
 }
 
 /// A recorded UP VM "vm1" in r1 pointing at `instance_id`/`ip`.
-fn record(db: &Db, instance_id: &str, ip: &str, spec_json: &str) -> VmRecord {
+async fn record(db: &dyn StateStore, instance_id: &str, ip: &str, spec_json: &str) -> VmRecord {
     db.upsert_provisioning("vm1", "fake", "r1", None, "t", spec_json)
+        .await
         .unwrap();
     db.mark_up(
         "vm1",
@@ -141,8 +142,9 @@ fn record(db: &Db, instance_id: &str, ip: &str, spec_json: &str) -> VmRecord {
             ssh_config_path: "/ssh/vm1".into(),
         },
     )
+    .await
     .unwrap();
-    db.get("vm1").unwrap().unwrap()
+    db.get("vm1").await.unwrap().unwrap()
 }
 
 /// A provider with a running instance for vm1; returns (provider, id, ip).
@@ -177,9 +179,9 @@ fn status_of(report: &HealthReport, name: &str) -> Vec<CheckStatus> {
 
 #[tokio::test]
 async fn healthy_vm_passes_every_rung() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, id, ip) = running().await;
-    let record = record(&db, &id, &ip, "{}");
+    let record = record(&db, &id, &ip, "{}").await;
     let report = check(
         Some(&provider),
         &record,
@@ -200,9 +202,9 @@ async fn healthy_vm_passes_every_rung() {
 
 #[tokio::test]
 async fn instance_missing_at_the_vendor_is_gone() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let provider = FakeProvider::new(vec![]);
-    let record = record(&db, "i-9", "203.0.113.9", "{}");
+    let record = record(&db, "i-9", "203.0.113.9", "{}").await;
     let report = check(
         Some(&provider),
         &record,
@@ -221,10 +223,10 @@ async fn stopped_or_failed_instance_is_unhealthy() {
         InstanceStatus::Stopped,
         InstanceStatus::Failed("preempted".into()),
     ] {
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
         let provider = FakeProvider::new(vec![]);
         let id = provider.seed_instance("vm1", "r1", status.clone());
-        let record = record(&db, &id, "203.0.113.1", "{}");
+        let record = record(&db, &id, "203.0.113.1", "{}").await;
         let report = check(
             Some(&provider),
             &record,
@@ -238,9 +240,9 @@ async fn stopped_or_failed_instance_is_unhealthy() {
 
 #[tokio::test]
 async fn a_replacement_instance_is_degraded() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, _id, ip) = running().await;
-    let record = record(&db, "i-old", &ip, "{}");
+    let record = record(&db, "i-old", &ip, "{}").await;
     let report = check(
         Some(&provider),
         &record,
@@ -254,9 +256,9 @@ async fn a_replacement_instance_is_degraded() {
 
 #[tokio::test]
 async fn a_changed_address_is_degraded() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, id, _ip) = running().await;
-    let record = record(&db, &id, "198.51.100.200", "{}");
+    let record = record(&db, &id, "198.51.100.200", "{}").await;
     let report = check(
         Some(&provider),
         &record,
@@ -273,9 +275,9 @@ async fn a_changed_address_is_degraded() {
 
 #[tokio::test]
 async fn running_but_unreachable_or_ssh_failing_is_degraded() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, id, ip) = running().await;
-    let record = record(&db, &id, &ip, "{}");
+    let record = record(&db, &id, &ip, "{}").await;
     let closed = Probes {
         tcp: false,
         ..Probes::default()
@@ -301,9 +303,9 @@ async fn running_but_unreachable_or_ssh_failing_is_degraded() {
 
 #[tokio::test]
 async fn blocked_icmp_alone_does_not_degrade() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, id, ip) = running().await;
-    let record = record(&db, &id, &ip, "{}");
+    let record = record(&db, &id, &ip, "{}").await;
     let no_ping = Probes {
         ping: false,
         ..Probes::default()
@@ -326,13 +328,13 @@ async fn vendor_findings_set_the_verdict_by_severity() {
             Verdict::Unhealthy,
         ),
     ] {
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
         let (inner, id, ip) = running().await;
         let provider = WithFindings {
             inner,
             findings: vec![finding.clone()],
         };
-        let record = record(&db, &id, &ip, "{}");
+        let record = record(&db, &id, &ip, "{}").await;
         let report = check(
             Some(&provider),
             &record,
@@ -347,8 +349,8 @@ async fn vendor_findings_set_the_verdict_by_severity() {
 
 #[tokio::test]
 async fn without_the_vendor_the_network_decides() {
-    let db = Db::open_in_memory().unwrap();
-    let record = record(&db, "i-1", "203.0.113.1", "{}");
+    let db = SqliteStore::open_in_memory().unwrap();
+    let record = record(&db, "i-1", "203.0.113.1", "{}").await;
 
     // Reachable and our key logs in: healthy, but flagged as network-judged.
     let report = check(None, &record, &Probes::default(), HealthOptions::default()).await;
@@ -386,9 +388,9 @@ async fn a_bare_address_gets_network_probes_only() {
 
 #[tokio::test]
 async fn deep_checks_gpu_and_k3s() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let (provider, id, ip) = running().await;
-    let record = record(&db, &id, &ip, r#"{"gpus":"A10G:1","kubernetes":true}"#);
+    let record = record(&db, &id, &ip, r#"{"gpus":"A10G:1","kubernetes":true}"#).await;
     let deep = HealthOptions { deep: true };
 
     let good = Probes::default()
@@ -418,10 +420,10 @@ async fn deep_checks_gpu_and_k3s() {
 
 #[tokio::test]
 async fn a_torn_down_vm_is_gone_without_asking_the_vendor() {
-    let db = Db::open_in_memory().unwrap();
+    let db = SqliteStore::open_in_memory().unwrap();
     let provider = FakeProvider::new(vec![]);
-    let mut rec = record(&db, "i-1", "203.0.113.1", "{}");
-    db.set_state("vm1", VmState::Terminated).unwrap();
+    let mut rec = record(&db, "i-1", "203.0.113.1", "{}").await;
+    db.set_state("vm1", VmState::Terminated).await.unwrap();
     rec.state = VmState::Terminated;
     let report = check(
         Some(&provider),
@@ -434,27 +436,28 @@ async fn a_torn_down_vm_is_gone_without_asking_the_vendor() {
     assert_eq!(provider.count_calls("observe"), 0);
 }
 
-#[test]
-fn resolve_by_name_id_ip_or_bare_address() {
-    let db = Db::open_in_memory().unwrap();
-    record(&db, "i-1", "203.0.113.1", "{}");
+#[tokio::test]
+async fn resolve_by_name_id_ip_or_bare_address() {
+    let db = SqliteStore::open_in_memory().unwrap();
+    record(&db, "i-1", "203.0.113.1", "{}").await;
     for handle in ["vm1", "i-1", "203.0.113.1"] {
         assert!(
-            matches!(resolve(&db, handle).unwrap(), Target::Vm(r) if r.name == "vm1"),
+            matches!(resolve(&db, handle).await.unwrap(), Target::Vm(r) if r.name == "vm1"),
             "{handle}"
         );
     }
     assert!(matches!(
-        resolve(&db, "198.51.100.4").unwrap(),
+        resolve(&db, "198.51.100.4").await.unwrap(),
         Target::Address(a) if a == "198.51.100.4"
     ));
     assert!(matches!(
-        resolve(&db, "nope"),
+        resolve(&db, "nope").await,
         Err(ResolveError::NotFound(_))
     ));
 
     // The same IP recorded for two live VMs is ambiguous.
     db.upsert_provisioning("vm2", "fake", "r1", None, "t", "{}")
+        .await
         .unwrap();
     db.mark_up(
         "vm2",
@@ -470,14 +473,15 @@ fn resolve_by_name_id_ip_or_bare_address() {
             ssh_config_path: "/s".into(),
         },
     )
+    .await
     .unwrap();
     assert!(matches!(
-        resolve(&db, "203.0.113.1"),
+        resolve(&db, "203.0.113.1").await,
         Err(ResolveError::Ambiguous { .. })
     ));
     // …unless only one of them is still live.
-    db.set_state("vm2", VmState::Terminated).unwrap();
-    assert!(matches!(resolve(&db, "203.0.113.1").unwrap(), Target::Vm(r) if r.name == "vm1"));
+    db.set_state("vm2", VmState::Terminated).await.unwrap();
+    assert!(matches!(resolve(&db, "203.0.113.1").await.unwrap(), Target::Vm(r) if r.name == "vm1"));
 }
 
 #[test]

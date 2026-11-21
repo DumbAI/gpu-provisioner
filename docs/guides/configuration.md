@@ -7,7 +7,7 @@ Everything lives under `~/.gpu-provisioner`, or under `$GPUPROV_HOME` when set:
 ```
 ~/.gpu-provisioner/
 ├── config.toml        # optional CLI config (below)
-├── state.db           # SQLite: VM rows + state-machine journal
+├── state.db           # SQLite: VM rows + state-machine journal (embedders may use Postgres: see Embedding gpuprov)
 ├── keys/              # the shared ed25519 keypair (generated on first use)
 ├── ssh/<name>         # per-VM ssh config, Include'd from ~/.ssh/config
 ├── sockets/           # ssh ControlMaster sockets

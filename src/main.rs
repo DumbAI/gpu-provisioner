@@ -13,7 +13,9 @@ use clap::{Args, Parser, Subcommand};
 
 use gpu_provisioner::cluster::k3s::{K3sMachine, K3sState};
 use gpu_provisioner::config::AppConfig;
-use gpu_provisioner::db::{Db, VmRecord, VmState};
+use gpu_provisioner::db::{
+    migrate, PgOptions, PgStore, SqliteStore, StateStore, VmRecord, VmState,
+};
 use gpu_provisioner::kube::{self, AccessMode, KubeAccess};
 use gpu_provisioner::machine::{Cancel, Executor};
 use gpu_provisioner::planner;
@@ -65,6 +67,28 @@ enum Command {
     Tunnel(NameArg),
     /// Terminate a VM and clean up its cloud resources and local state
     Down(NameArg),
+    /// Manage the state store
+    #[command(subcommand)]
+    State(StateCommand),
+}
+
+#[derive(Subcommand)]
+enum StateCommand {
+    /// Copy the local SQLite state (VM records and the operation journal)
+    /// into a Postgres store, for embedders that keep gpuprov's state there.
+    /// Refuses while an operation runs; never overwrites; safe to re-run.
+    Migrate(MigrateArgs),
+}
+
+#[derive(Args)]
+struct MigrateArgs {
+    /// Target database (`postgres://user:pass@host:port/db?sslmode=require`;
+    /// `sslrootcert=<pem>` trusts a provider CA)
+    #[arg(long, value_name = "URL")]
+    to: String,
+    /// Postgres schema for gpuprov's tables (created if absent)
+    #[arg(long, default_value = "gpuprov")]
+    schema: String,
 }
 
 #[derive(Args)]
@@ -165,12 +189,13 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Provision(args) => provision(args, &config, &paths).await,
         Command::Ssh(args) => ssh(args, &paths).await,
-        Command::List => list(&paths),
+        Command::List => list(&paths).await,
         Command::Health(args) => health(args, &config, &paths).await,
-        Command::Status(args) => status(&args.name, &paths),
+        Command::Status(args) => status(&args.name, &paths).await,
         Command::Kubeconfig(args) => kubeconfig(&args.name, &config, &paths).await,
-        Command::Tunnel(args) => tunnel(&args.name, &paths),
+        Command::Tunnel(args) => tunnel(&args.name, &paths).await,
         Command::Down(args) => down(&args.name, &config, &paths).await,
+        Command::State(StateCommand::Migrate(args)) => state_migrate(args, &paths).await,
     }
 }
 
@@ -203,8 +228,8 @@ fn install_ctrl_c(cancel: &Cancel) {
     });
 }
 
-fn open_db(paths: &Paths) -> Result<Db> {
-    Db::open(&paths.db_path()).context("cannot open state database")
+fn open_db(paths: &Paths) -> Result<SqliteStore> {
+    SqliteStore::open(&paths.db_path()).context("cannot open state database")
 }
 
 /// The long-running, blocking provisioning operation. Ends with an `UP`
@@ -376,7 +401,7 @@ fn print_kube(vm: &ReadyVm, access: &KubeAccess) {
 /// whose exit code is propagated.
 async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let record = load_record(&db, &args.name)?;
+    let record = load_record(&db, &args.name).await?;
     if record.state != VmState::Up {
         bail!(
             "VM '{}' is {}, not UP{}",
@@ -406,8 +431,9 @@ async fn ssh(args: SshArgs, paths: &Paths) -> Result<()> {
 }
 
 /// Look up a VM record by name, with a CLI-friendly not-found message.
-fn load_record(db: &Db, name: &str) -> Result<VmRecord> {
-    db.get(name)?
+async fn load_record(db: &dyn StateStore, name: &str) -> Result<VmRecord> {
+    db.get(name)
+        .await?
         .with_context(|| format!("no VM named '{name}' — see `gpuprov list`"))
 }
 
@@ -416,7 +442,7 @@ fn load_record(db: &Db, name: &str) -> Result<VmRecord> {
 /// a half-installed node.
 async fn kubeconfig(name: &str, config: &AppConfig, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let record = load_record(&db, name)?;
+    let record = load_record(&db, name).await?;
     let spec: VmSpec = serde_json::from_str(&record.spec_json)
         .with_context(|| format!("cannot parse stored spec for VM '{name}'"))?;
     if spec.kubernetes != Some(true) {
@@ -463,9 +489,9 @@ async fn kubeconfig(name: &str, config: &AppConfig, paths: &Paths) -> Result<()>
 
 /// `ssh -N -L 16443:127.0.0.1:6443` for clusters on clouds without inbound
 /// ports (the kubeconfig points at 127.0.0.1:16443).
-fn tunnel(name: &str, paths: &Paths) -> Result<()> {
+async fn tunnel(name: &str, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let record = load_record(&db, name)?;
+    let record = load_record(&db, name).await?;
     if record.state != VmState::Up {
         bail!("VM '{name}' is {}, not UP", record.state);
     }
@@ -489,9 +515,9 @@ fn tunnel(name: &str, paths: &Paths) -> Result<()> {
     bail!("failed to exec ssh: {err}")
 }
 
-fn list(paths: &Paths) -> Result<()> {
+async fn list(paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let records = db.list()?;
+    let records = db.list().await?;
     if records.is_empty() {
         println!(
             "No VMs yet. Provision one with: gpuprov provision --name <name> --instance-type \
@@ -530,15 +556,17 @@ fn list(paths: &Paths) -> Result<()> {
 async fn health(args: HealthArgs, config: &AppConfig, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
     let targets: Vec<Target> = if args.targets.is_empty() {
-        health::live_records(&db)?
+        health::live_records(&db)
+            .await?
             .into_iter()
             .map(|r| Target::Vm(Box::new(r)))
             .collect()
     } else {
-        args.targets
-            .iter()
-            .map(|t| health::resolve(&db, t))
-            .collect::<Result<_, _>>()?
+        let mut targets = Vec::with_capacity(args.targets.len());
+        for t in &args.targets {
+            targets.push(health::resolve(&db, t).await?);
+        }
+        targets
     };
     if targets.is_empty() {
         println!("No live VMs to check (see `gpuprov list`).");
@@ -615,9 +643,9 @@ fn print_health(report: &HealthReport) {
     println!();
 }
 
-fn status(name: &str, paths: &Paths) -> Result<()> {
+async fn status(name: &str, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let record = load_record(&db, name)?;
+    let record = load_record(&db, name).await?;
     println!(
         "{name}: {} on {} {}{}",
         record.state,
@@ -630,7 +658,7 @@ fn status(name: &str, paths: &Paths) -> Result<()> {
             .map(|z| format!("/{z}"))
             .unwrap_or_default()
     );
-    if let Some(row) = db.load_machine(name)? {
+    if let Some(row) = db.load_machine(name).await? {
         println!(
             "last operation ({}): {}{}",
             row.kind,
@@ -643,7 +671,7 @@ fn status(name: &str, paths: &Paths) -> Result<()> {
         );
     }
     println!("recent transitions:");
-    for event in db.machine_events(name, 30)? {
+    for event in db.machine_events(name, 30).await? {
         println!(
             "  {}  [{}] {}",
             util::format_unix_utc(event.ts),
@@ -661,12 +689,12 @@ fn status(name: &str, paths: &Paths) -> Result<()> {
 
 async fn down(name: &str, config: &AppConfig, paths: &Paths) -> Result<()> {
     let db = open_db(paths)?;
-    let record = load_record(&db, name)?;
+    let record = load_record(&db, name).await?;
     kube::remove_kubeconfig(paths, name)?;
 
     let Some(start) = TeardownState::for_record(&record) else {
         println!("VM '{name}' has no region recorded (never provisioned); removing local state.");
-        db.set_state(name, VmState::Terminated)?;
+        db.set_state(name, VmState::Terminated).await?;
         config_file::remove_vm_host_entry(&paths.ssh_dir(), name)?;
         return Ok(());
     };
@@ -707,4 +735,38 @@ async fn down(name: &str, config: &AppConfig, paths: &Paths) -> Result<()> {
         ),
         TeardownState::Running(_) => unreachable!("executor returns terminal states"),
     }
+}
+
+/// `gpuprov state migrate`: copy the local SQLite state into Postgres.
+async fn state_migrate(args: MigrateArgs, paths: &Paths) -> Result<()> {
+    let from = open_db(paths)?;
+    let to = PgStore::connect_with(
+        &args.to,
+        PgOptions {
+            schema: args.schema,
+            ..PgOptions::default()
+        },
+    )
+    .await
+    .context("cannot open the target Postgres store")?;
+    let report = migrate::sqlite_to_postgres(&from, &to).await?;
+    let c = &report.counts;
+    println!(
+        "Copied {} VM record(s), {} journal(s) and {} event(s) into schema '{}' \
+         ({} record(s) and {} journal(s) already there were kept).",
+        c.vms_copied,
+        c.machines_copied,
+        c.events_copied,
+        to.schema(),
+        c.vms_kept,
+        c.machines_kept
+    );
+    if !report.in_flight.is_empty() {
+        println!(
+            "In-flight operations copied (they resume on the next run against Postgres; do not \
+             also resume them with this CLI): {}",
+            report.in_flight.join(", ")
+        );
+    }
+    Ok(())
 }

@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Db, VmRecord, VmState};
+use crate::db::{StateStore, VmRecord, VmState};
 use crate::machine::{Machine, Step, StepCx};
 use crate::provider::{CloudProvider, InstanceStatus, Location, ProviderError};
 use crate::ssh::config_file;
@@ -156,7 +156,7 @@ impl TeardownState {
 /// failed one leaves the VM `LEAKED` (with its location) instead of lying.
 pub struct TeardownMachine<'a> {
     pub provider: &'a dyn CloudProvider,
-    pub db: &'a Db,
+    pub db: &'a dyn StateStore,
     pub paths: &'a Paths,
     pub vm_name: String,
 }
@@ -196,11 +196,12 @@ impl Machine for TeardownMachine<'_> {
                 note,
             },
             TeardownStep::Retry(error) => Step::Retry { error },
-            TeardownStep::TimedOut(reason) => self.leaked(td, reason),
+            TeardownStep::TimedOut(reason) => self.leaked(td, reason).await,
             TeardownStep::Done => {
                 let projected = self
                     .db
                     .set_state(&self.vm_name, VmState::Terminated)
+                    .await
                     .map_err(|e| e.to_string())
                     .and_then(|()| {
                         config_file::remove_vm_host_entry(&self.paths.ssh_dir(), &self.vm_name)
@@ -214,11 +215,11 @@ impl Machine for TeardownMachine<'_> {
         }
     }
 
-    fn on_retries_exhausted(&self, s: &TeardownState, last_error: String) -> TeardownState {
+    async fn on_retries_exhausted(&self, s: &TeardownState, last_error: String) -> TeardownState {
         let TeardownState::Running(td) = s else {
             return s.clone();
         };
-        self.leaked_state(td, last_error)
+        self.leaked_state(td, last_error).await
     }
 
     /// Ctrl-C during `down` keeps tearing down (stopping halfway is how leaks
@@ -229,13 +230,17 @@ impl Machine for TeardownMachine<'_> {
 }
 
 impl TeardownMachine<'_> {
-    fn leaked_state(&self, td: &Teardown, reason: String) -> TeardownState {
-        if let Err(e) = self.db.mark_leaked(
-            &self.vm_name,
-            self.provider.name(),
-            &td.location.region,
-            td.location.zone.as_deref(),
-        ) {
+    async fn leaked_state(&self, td: &Teardown, reason: String) -> TeardownState {
+        if let Err(e) = self
+            .db
+            .mark_leaked(
+                &self.vm_name,
+                self.provider.name(),
+                &td.location.region,
+                td.location.zone.as_deref(),
+            )
+            .await
+        {
             tracing::error!("could not record LEAKED state for '{}': {e}", self.vm_name);
         }
         TeardownState::Leaked {
@@ -244,7 +249,7 @@ impl TeardownMachine<'_> {
         }
     }
 
-    fn leaked(&self, td: &Teardown, reason: String) -> Step<TeardownState> {
-        Step::Next(self.leaked_state(td, reason))
+    async fn leaked(&self, td: &Teardown, reason: String) -> Step<TeardownState> {
+        Step::Next(self.leaked_state(td, reason).await)
     }
 }

@@ -47,6 +47,22 @@ $ gpuprov down dev
   and API reachability, and reached directly or through `gpuprov tunnel` on clouds
   without inbound ports.
 - **No server.** A single binary with state under `~/.gpu-provisioner`.
+- **Embeddable.** As a library, gpuprov can keep its state in Postgres (its own
+  schema, migrations, a fenced cross-host lease) and take the SSH key from the
+  caller, so a worker that embeds it can be stateless. See
+  [Embedding gpuprov](docs/guides/library.md).
+
+## State
+
+`db::StateStore` holds everything gpuprov remembers: the `vms` projection, the
+state-machine journal and a per-VM single-writer lease. The CLI uses
+`SqliteStore` (`~/.gpu-provisioner/state.db`); embedders may use `PgStore`
+(`PgStore::connect("postgres://…")`, tables in the `gpuprov` schema). The lease
+is taken atomically, judged stale after 60 s by the database's clock, and
+**fenced**: a run whose lease was taken over fails its next journal write or
+heartbeat with `LeaseLost` and stops. `gpuprov state migrate --to postgres://…`
+copies the SQLite state into Postgres (refuses while an operation runs; safe to
+re-run).
 
 ## Install
 

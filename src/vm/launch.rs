@@ -19,7 +19,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::db::{Db, UpFields, VmRecord, VmState};
+use crate::db::{StateStore, UpFields, VmRecord, VmState};
 use crate::machine::{Machine, RetryPolicy, Step, StepCx};
 use crate::provider::{
     BlockScope, CloudProvider, ErrorKind, Feature, InstanceSpec, InstanceStatus, Location,
@@ -317,7 +317,7 @@ impl Connector for SshConnector {
 /// Everything a launch needs that does not change while it runs.
 pub struct LaunchMachine<'a> {
     pub provider: &'a dyn CloudProvider,
-    pub db: &'a Db,
+    pub db: &'a dyn StateStore,
     pub paths: &'a Paths,
     pub connector: &'a dyn Connector,
     pub spec: InstanceSpec,
@@ -440,18 +440,20 @@ impl Machine for LaunchMachine<'_> {
         }
     }
 
-    fn on_retries_exhausted(&self, s: &LaunchState, last_error: String) -> LaunchState {
+    async fn on_retries_exhausted(&self, s: &LaunchState, last_error: String) -> LaunchState {
         let error = ProviderError::failed(last_error.clone());
         match s {
-            LaunchState::Reconciling | LaunchState::Planning => self.abort(last_error, Vec::new()),
+            LaunchState::Reconciling | LaunchState::Planning => {
+                self.abort(last_error, Vec::new()).await
+            }
             LaunchState::Preparing { search }
             | LaunchState::Creating { search, .. }
             | LaunchState::Booting { search, .. } => self.compensation(search.clone(), error),
             LaunchState::Connecting { search, vm } => match search {
                 Some(search) if !vm.reused => self.compensation(search.clone(), error),
-                _ => self.abort(last_error, Vec::new()),
+                _ => self.abort(last_error, Vec::new()).await,
             },
-            LaunchState::Compensating { teardown, .. } => self.leaked(teardown, last_error),
+            LaunchState::Compensating { teardown, .. } => self.leaked(teardown, last_error).await,
             other => other.clone(),
         }
     }
@@ -497,7 +499,7 @@ impl LaunchMachine<'_> {
         if let Some(rejected) = self.check_features() {
             return Step::Next(rejected);
         }
-        let record = match self.db.get(self.vm_name()) {
+        let record = match self.db.get(self.vm_name()).await {
             Ok(r) => r,
             Err(e) => {
                 return Step::Retry {
@@ -533,7 +535,7 @@ impl LaunchMachine<'_> {
             Ok(o) => o,
             Err(e) if e.kind == ErrorKind::Transient => return Step::Retry { error: e.msg },
             Err(e) if e.kind.is_fatal() => {
-                return Step::Next(self.abort(e.to_string(), Vec::new()))
+                return Step::Next(self.abort(e.to_string(), Vec::new()).await)
             }
             Err(e) => return Step::Retry { error: e.msg },
         };
@@ -615,11 +617,11 @@ impl LaunchMachine<'_> {
                 );
                 match Search::start(offers) {
                     Some(search) => Step::Next(LaunchState::Preparing { search }),
-                    None => Step::Next(self.exhausted(Vec::new())),
+                    None => Step::Next(self.exhausted(Vec::new()).await),
                 }
             }
             Err(e) if e.kind == ErrorKind::Transient => Step::Retry { error: e.msg },
-            Err(e) => Step::Next(self.abort(e.to_string(), Vec::new())),
+            Err(e) => Step::Next(self.abort(e.to_string(), Vec::new()).await),
         }
     }
 
@@ -629,14 +631,18 @@ impl LaunchMachine<'_> {
         let offer = search.offer();
         // Record the attempt before creating anything, so the row points at
         // where resources may appear.
-        if let Err(e) = self.db.upsert_provisioning(
-            self.vm_name(),
-            self.provider.name(),
-            &offer.region,
-            offer.zone.as_deref(),
-            &offer.instance_type,
-            &self.spec_json,
-        ) {
+        if let Err(e) = self
+            .db
+            .upsert_provisioning(
+                self.vm_name(),
+                self.provider.name(),
+                &offer.region,
+                offer.zone.as_deref(),
+                &offer.instance_type,
+                &self.spec_json,
+            )
+            .await
+        {
             return Step::Retry {
                 error: e.to_string(),
             };
@@ -646,7 +652,7 @@ impl LaunchMachine<'_> {
                 search: search.clone(),
                 prepared,
             }),
-            Err(e) => self.attempt_failed(search, e),
+            Err(e) => self.attempt_failed(search, e).await,
         }
     }
 
@@ -659,7 +665,7 @@ impl LaunchMachine<'_> {
             .await
         {
             Ok(o) => o,
-            Err(e) => return self.attempt_failed(search, e),
+            Err(e) => return self.attempt_failed(search, e).await,
         };
         match existing.as_slice() {
             [] => {}
@@ -671,13 +677,15 @@ impl LaunchMachine<'_> {
                 });
             }
             many => {
-                return self.attempt_failed(
-                    search,
-                    ProviderError::failed(format!(
-                        "{} live instances carry this VM's identity; refusing to guess",
-                        many.len()
-                    )),
-                )
+                return self
+                    .attempt_failed(
+                        search,
+                        ProviderError::failed(format!(
+                            "{} live instances carry this VM's identity; refusing to guess",
+                            many.len()
+                        )),
+                    )
+                    .await
             }
         }
         match self.provider.create(offer, prepared, &self.spec).await {
@@ -685,7 +693,7 @@ impl LaunchMachine<'_> {
                 search: search.clone(),
                 instance_id,
             }),
-            Err(e) => self.attempt_failed(search, e),
+            Err(e) => self.attempt_failed(search, e).await,
         }
     }
 
@@ -698,7 +706,7 @@ impl LaunchMachine<'_> {
             .await
         {
             Ok(o) => o,
-            Err(e) => return self.attempt_failed(search, e),
+            Err(e) => return self.attempt_failed(search, e).await,
         };
         let Some(instance) = observed.iter().find(|o| o.instance_id == instance_id) else {
             if cx.in_state < VISIBILITY_GRACE {
@@ -707,10 +715,14 @@ impl LaunchMachine<'_> {
                     note: format!("{instance_id} not visible yet"),
                 };
             }
-            return self.attempt_failed(
-                search,
-                ProviderError::failed(format!("instance {instance_id} disappeared while booting")),
-            );
+            return self
+                .attempt_failed(
+                    search,
+                    ProviderError::failed(format!(
+                        "instance {instance_id} disappeared while booting"
+                    )),
+                )
+                .await;
         };
         if instance.is_ready() {
             return Step::Next(LaunchState::Connecting {
@@ -719,32 +731,38 @@ impl LaunchMachine<'_> {
             });
         }
         if let InstanceStatus::Failed(reason) = &instance.status {
-            return self.attempt_failed(
-                search,
-                ProviderError::failed(format!("instance {instance_id} failed: {reason}")),
-            );
+            return self
+                .attempt_failed(
+                    search,
+                    ProviderError::failed(format!("instance {instance_id} failed: {reason}")),
+                )
+                .await;
         }
         if matches!(
             instance.status,
             InstanceStatus::Stopping | InstanceStatus::Stopped | InstanceStatus::Terminating
         ) {
-            return self.attempt_failed(
-                search,
-                ProviderError::capacity(format!(
-                    "instance {instance_id} went {:?} while booting (preempted?)",
-                    instance.status
-                )),
-            );
+            return self
+                .attempt_failed(
+                    search,
+                    ProviderError::capacity(format!(
+                        "instance {instance_id} went {:?} while booting (preempted?)",
+                        instance.status
+                    )),
+                )
+                .await;
         }
         if cx.in_state >= caps.boot_timeout {
             // A launch that never becomes ready is treated as no capacity here.
-            return self.attempt_failed(
-                search,
-                ProviderError::capacity(format!(
-                    "instance {instance_id} not ready after {}s",
-                    caps.boot_timeout.as_secs()
-                )),
-            );
+            return self
+                .attempt_failed(
+                    search,
+                    ProviderError::capacity(format!(
+                        "instance {instance_id} not ready after {}s",
+                        caps.boot_timeout.as_secs()
+                    )),
+                )
+                .await;
         }
         Step::Poll {
             after: caps.poll_interval,
@@ -763,7 +781,7 @@ impl LaunchMachine<'_> {
             .probe(&vm.endpoint, vm.user(), &vm.ssh_key_path)
             .await
         {
-            Ok(()) => match self.persist_up(vm) {
+            Ok(()) => match self.persist_up(vm).await {
                 Ok(vm) => Step::Next(LaunchState::Ready(vm)),
                 Err(e) => Step::Retry { error: e },
             },
@@ -780,7 +798,7 @@ impl LaunchMachine<'_> {
                     Some(search) if !vm.reused => {
                         Step::Next(self.compensation(search.clone(), ProviderError::failed(msg)))
                     }
-                    _ => Step::Next(self.abort(msg, Vec::new())),
+                    _ => Step::Next(self.abort(msg, Vec::new()).await),
                 }
             }
             Err(last) => Step::Poll {
@@ -813,7 +831,7 @@ impl LaunchMachine<'_> {
                 note,
             },
             TeardownStep::Retry(error) => Step::Retry { error },
-            TeardownStep::TimedOut(reason) => Step::Next(self.leaked(teardown, reason)),
+            TeardownStep::TimedOut(reason) => Step::Next(self.leaked(teardown, reason).await),
             TeardownStep::Done => match then {
                 AfterTeardown::Replan => Step::Next(LaunchState::Planning),
                 AfterTeardown::Abort(reason) => Step::Next(
@@ -823,7 +841,8 @@ impl LaunchMachine<'_> {
                             .as_ref()
                             .map(|s| s.history.clone())
                             .unwrap_or_default(),
-                    ),
+                    )
+                    .await,
                 ),
                 AfterTeardown::NextOffer => {
                     let (Some(search), Some(error)) = (search.clone(), failure.clone()) else {
@@ -831,7 +850,7 @@ impl LaunchMachine<'_> {
                     };
                     match search.fail_and_advance(error) {
                         Ok(search) => Step::Next(LaunchState::Preparing { search }),
-                        Err(history) => Step::Next(self.exhausted(history)),
+                        Err(history) => Step::Next(self.exhausted(history).await),
                     }
                 }
             },
@@ -843,13 +862,13 @@ impl LaunchMachine<'_> {
     /// Classify an attempt failure:
     /// transient → retry the step; nothing created → next offer directly;
     /// fatal → compensate then abort; otherwise compensate then next offer.
-    fn attempt_failed(&self, search: &Search, error: ProviderError) -> Step<LaunchState> {
+    async fn attempt_failed(&self, search: &Search, error: ProviderError) -> Step<LaunchState> {
         tracing::warn!("[{}] attempt failed: {error}", search.offer());
         match error.kind {
             ErrorKind::Transient => Step::Retry { error: error.msg },
             ErrorKind::Unavailable => match search.clone().fail_and_advance(error) {
                 Ok(search) => Step::Next(LaunchState::Preparing { search }),
-                Err(history) => Step::Next(self.exhausted(history)),
+                Err(history) => Step::Next(self.exhausted(history).await),
             },
             kind if kind.is_fatal() => Step::Next(LaunchState::Compensating {
                 teardown: Teardown::new(search.offer().location()),
@@ -887,27 +906,31 @@ impl LaunchMachine<'_> {
         }
     }
 
-    fn exhausted(&self, history: Vec<Failure>) -> LaunchState {
+    async fn exhausted(&self, history: Vec<Failure>) -> LaunchState {
         if self.retry_until_up {
             return LaunchState::WaitingToRetry { history };
         }
-        self.project_state(VmState::Failed);
+        self.project_state(VmState::Failed).await;
         LaunchState::Exhausted { history }
     }
 
-    fn abort(&self, reason: String, history: Vec<Failure>) -> LaunchState {
-        self.project_state(VmState::Failed);
+    async fn abort(&self, reason: String, history: Vec<Failure>) -> LaunchState {
+        self.project_state(VmState::Failed).await;
         LaunchState::Aborted { reason, history }
     }
 
-    fn leaked(&self, teardown: &Teardown, reason: String) -> LaunchState {
+    async fn leaked(&self, teardown: &Teardown, reason: String) -> LaunchState {
         let at = &teardown.location;
-        if let Err(e) = self.db.mark_leaked(
-            self.vm_name(),
-            self.provider.name(),
-            &at.region,
-            at.zone.as_deref(),
-        ) {
+        if let Err(e) = self
+            .db
+            .mark_leaked(
+                self.vm_name(),
+                self.provider.name(),
+                &at.region,
+                at.zone.as_deref(),
+            )
+            .await
+        {
             tracing::error!(
                 "could not record LEAKED state for '{}': {e}",
                 self.vm_name()
@@ -919,9 +942,9 @@ impl LaunchMachine<'_> {
         }
     }
 
-    fn project_state(&self, state: VmState) {
+    async fn project_state(&self, state: VmState) {
         // Only an existing row is updated; a never-provisioned name has none.
-        if let Err(e) = self.db.set_state(self.vm_name(), state) {
+        if let Err(e) = self.db.set_state(self.vm_name(), state).await {
             tracing::error!("could not record {state} for '{}': {e}", self.vm_name());
         }
     }
@@ -947,7 +970,7 @@ impl LaunchMachine<'_> {
     }
 
     /// Projection on success: per-VM SSH config entry + `UP` row.
-    fn persist_up(&self, vm: &ReadyVm) -> Result<ReadyVm, String> {
+    async fn persist_up(&self, vm: &ReadyVm) -> Result<ReadyVm, String> {
         let ssh_config_path = config_file::write_vm_host_entry(
             &self.paths.ssh_dir(),
             &vm.name,
@@ -961,7 +984,7 @@ impl LaunchMachine<'_> {
         // never passed through `Preparing` (adopted VM, or a resume that
         // started past it).
         {
-            let existing = self.db.get(&vm.name).map_err(|e| e.to_string())?;
+            let existing = self.db.get(&vm.name).await.map_err(|e| e.to_string())?;
             if existing.is_none() {
                 self.db
                     .upsert_provisioning(
@@ -972,6 +995,7 @@ impl LaunchMachine<'_> {
                         &vm.offer.instance_type,
                         &self.spec_json,
                     )
+                    .await
                     .map_err(|e| e.to_string())?;
             }
         }
@@ -990,6 +1014,7 @@ impl LaunchMachine<'_> {
                     ssh_config_path: ssh_config_path.display().to_string(),
                 },
             )
+            .await
             .map_err(|e| e.to_string())?;
         Ok(ReadyVm {
             ssh_config_path: Some(ssh_config_path),

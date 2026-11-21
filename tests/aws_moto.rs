@@ -58,7 +58,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use aws_sdk_ec2::types::Filter;
 use gpu_provisioner::config::{AppConfig, AwsConfig};
-use gpu_provisioner::db::VmState;
+use gpu_provisioner::db::{StateStore, VmState};
 use gpu_provisioner::machine::Cancel;
 use gpu_provisioner::provider::SshEndpoint;
 use gpu_provisioner::vm::health::{self, HealthOptions, Verdict};
@@ -356,10 +356,13 @@ async fn run(moto: &Moto, prefix: &str) -> Run {
     run
 }
 
-fn ready(run: &Run, end: LaunchState) -> ReadyVm {
+async fn ready(run: &Run, end: LaunchState) -> ReadyVm {
     match end {
         LaunchState::Ready(vm) => vm,
-        other => panic!("expected Ready, got {other:?}\njournal:\n{}", run.journal()),
+        other => panic!(
+            "expected Ready, got {other:?}\njournal:\n{}",
+            run.journal().await
+        ),
     }
 }
 
@@ -368,7 +371,7 @@ async fn assert_no_leftovers(moto: &Moto, run: &Run) {
     assert!(
         left.is_empty(),
         "billable resources left behind: {left:?}\njournal:\n{}",
-        run.journal()
+        run.journal().await
     );
 }
 
@@ -378,7 +381,7 @@ async fn lifecycle_leaves_nothing_behind() {
     let Some(endpoint) = endpoint() else { return };
     let moto = Moto::connect(endpoint).await;
     let run = run(&moto, "moto-life").await;
-    let vm = ready(&run, run.launch(Cancel::new()).await);
+    let vm = ready(&run, run.launch(Cancel::new()).await).await;
 
     let (user, port) = moto.expected_login();
     assert_eq!(vm.user(), user);
@@ -391,12 +394,20 @@ async fn lifecycle_leaves_nothing_behind() {
     let instances = moto.instances(&run.name).await;
     assert_eq!(instances.len(), 1, "exactly one instance: {instances:?}");
     assert_eq!(moto.security_groups(&run.name).await.len(), 1);
-    assert_eq!(run.db.get(&run.name).unwrap().unwrap().state, VmState::Up);
+    assert_eq!(
+        run.db.get(&run.name).await.unwrap().unwrap().state,
+        VmState::Up
+    );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert_no_leftovers(&moto, &run).await;
     assert_eq!(
-        run.db.get(&run.name).unwrap().unwrap().state,
+        run.db.get(&run.name).await.unwrap().unwrap().state,
         VmState::Terminated
     );
 }
@@ -407,8 +418,8 @@ async fn reprovision_reuses_the_running_instance() {
     let Some(endpoint) = endpoint() else { return };
     let moto = Moto::connect(endpoint).await;
     let run = run(&moto, "moto-reuse").await;
-    let first = ready(&run, run.launch(Cancel::new()).await);
-    let second = ready(&run, run.launch(Cancel::new()).await);
+    let first = ready(&run, run.launch(Cancel::new()).await).await;
+    let second = ready(&run, run.launch(Cancel::new()).await).await;
     assert!(second.reused, "second provision should reuse");
     assert_eq!(second.instance_id, first.instance_id);
     assert_eq!(
@@ -416,7 +427,12 @@ async fn reprovision_reuses_the_running_instance() {
         1,
         "no second RunInstances"
     );
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert_no_leftovers(&moto, &run).await;
 }
 
@@ -454,7 +470,7 @@ async fn interrupt_after_create_cleans_up() {
         LaunchState::Aborted { reason, .. } => assert!(reason.contains("cancelled"), "{reason}"),
         other => panic!(
             "expected a cancelled launch, got {other:?}\njournal:\n{}",
-            run.journal()
+            run.journal().await
         ),
     }
     // The instance really existed and was torn down.
@@ -473,8 +489,8 @@ async fn health_reports_a_reclaimed_vm_as_gone() {
     let Some(endpoint) = endpoint() else { return };
     let moto = Moto::connect(endpoint).await;
     let run = run(&moto, "moto-health").await;
-    ready(&run, run.launch(Cancel::new()).await);
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    ready(&run, run.launch(Cancel::new()).await).await;
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
 
     let report = health::check(
         Some(&*run.provider),
@@ -496,7 +512,12 @@ async fn health_reports_a_reclaimed_vm_as_gone() {
     .await;
     assert_eq!(report.verdict, Verdict::Gone, "{report:#?}");
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert_no_leftovers(&moto, &run).await;
 }
 
@@ -536,7 +557,7 @@ async fn diagnose_attributes_a_reclaim() {
     let Some(endpoint) = endpoint() else { return };
     let moto = Moto::connect(endpoint).await;
     let run = run(&moto, "moto-diag").await;
-    let vm = ready(&run, run.launch(Cancel::new()).await);
+    let vm = ready(&run, run.launch(Cancel::new()).await).await;
     let at = gpu_provisioner::provider::Location {
         region: REGION.into(),
         zone: None,
@@ -584,6 +605,11 @@ async fn diagnose_attributes_a_reclaim() {
         )
     );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert_no_leftovers(&moto, &run).await;
 }

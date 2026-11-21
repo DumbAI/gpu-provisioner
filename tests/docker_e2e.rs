@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpu_provisioner::config::{Defaults, DockerConfig};
-use gpu_provisioner::db::{Db, VmState};
+use gpu_provisioner::db::{JournalEntry, LeaseOwner, SqliteStore, StateStore, VmState};
 use gpu_provisioner::machine::{Cancel, Executor};
 use gpu_provisioner::planner::{self, Plan};
 use gpu_provisioner::provider::docker::{DockerProvider, LABEL_VM_NAME, REGION};
@@ -84,7 +84,7 @@ impl Drop for ContainerGuard {
 struct Env {
     _home: tempfile::TempDir,
     paths: Paths,
-    db: Db,
+    db: SqliteStore,
     key: KeyPair,
     name: String,
 }
@@ -96,7 +96,7 @@ impl Env {
             base: home.path().to_path_buf(),
         };
         paths.ensure_dirs().unwrap();
-        let db = Db::open(&paths.db_path()).unwrap();
+        let db = SqliteStore::open(&paths.db_path()).unwrap();
         let key = keys::ensure_keypair(&paths.keys_dir()).unwrap();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -165,7 +165,7 @@ impl Env {
             vm_name: self.name.clone(),
         };
         // Start from the DB row, exactly as `gpuprov down` does.
-        let record = self.db.get(&self.name).unwrap().expect("vms row");
+        let record = self.db.get(&self.name).await.unwrap().expect("vms row");
         let start = TeardownState::for_record(&record).expect("row has a location");
         Executor::new(&machine, &self.db, &self.name, Cancel::new())
             .run(start)
@@ -192,7 +192,7 @@ async fn launch_ssh_reuse_and_teardown() {
         vm.endpoint.port, 22,
         "SSH is published on a random host port"
     );
-    let record = env.db.get(&env.name).unwrap().unwrap();
+    let record = env.db.get(&env.name).await.unwrap().unwrap();
     assert_eq!(record.state, VmState::Up);
     assert_eq!(record.provider.as_deref(), Some("docker"));
     assert_eq!(record.ssh_port, Some(vm.endpoint.port));
@@ -231,7 +231,7 @@ async fn launch_ssh_reuse_and_teardown() {
     // 4. Teardown removes the container and records TERMINATED.
     assert_eq!(env.teardown(&provider).await, TeardownState::Done);
     assert!(containers(&env.name).is_empty());
-    let record = env.db.get(&env.name).unwrap().unwrap();
+    let record = env.db.get(&env.name).await.unwrap().unwrap();
     assert_eq!(record.state, VmState::Terminated);
     assert!(!record
         .ssh_config_path
@@ -256,6 +256,7 @@ async fn crash_after_create_resumes_by_adopting_the_container() {
     let offer = Offer::new("container", REGION);
     env.db
         .upsert_provisioning(&env.name, "docker", REGION, None, "container", "{}")
+        .await
         .unwrap();
     let prepared = provider.prepare(&offer, &plan.spec).await.unwrap();
     let instance_id = provider
@@ -266,22 +267,36 @@ async fn crash_after_create_resumes_by_adopting_the_container() {
         search: Search::start(vec![offer]).unwrap(),
         instance_id: instance_id.clone(),
     };
+    let crashed_run = LeaseOwner::new();
+    let crashed_json = serde_json::to_string(&crashed).unwrap();
+    env.db
+        .acquire_lease(&env.name, "vm", &crashed_run)
+        .await
+        .unwrap();
     env.db
         .save_machine(
             &env.name,
-            "vm",
-            &serde_json::to_string(&crashed).unwrap(),
-            "booting",
-            false,
-            None,
+            &crashed_run,
+            JournalEntry {
+                kind: "vm",
+                state_json: &crashed_json,
+                label: "booting",
+                terminal: false,
+                detail: None,
+            },
         )
+        .await
         .unwrap();
+    env.db.release_lease(&env.name, &crashed_run).await.unwrap();
 
     // The next run resumes at Booting and adopts the same container.
     let vm = env.launch(&provider).await;
     assert_eq!(vm.instance_id, instance_id);
     assert_eq!(containers(&env.name), vec![instance_id]);
-    assert_eq!(env.db.get(&env.name).unwrap().unwrap().state, VmState::Up);
+    assert_eq!(
+        env.db.get(&env.name).await.unwrap().unwrap().state,
+        VmState::Up
+    );
 
     assert_eq!(env.teardown(&provider).await, TeardownState::Done);
     assert!(containers(&env.name).is_empty());

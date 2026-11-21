@@ -32,7 +32,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::db::{Db, VmRecord, VmState};
+use crate::db::{StateStore, StoreError, VmRecord, VmState};
 use crate::kube;
 use crate::provider::{CloudProvider, InstanceStatus, Location, Severity, SshEndpoint};
 use crate::spec::VmSpec;
@@ -163,16 +163,16 @@ pub enum ResolveError {
     NotFound(String),
     #[error("'{target}' matches several VMs ({}); use the VM name", .names.join(", "))]
     Ambiguous { target: String, names: Vec<String> },
-    #[error("state db error: {0}")]
-    Db(#[from] rusqlite::Error),
+    #[error(transparent)]
+    Db(#[from] StoreError),
 }
 
 /// Resolve a handle: a VM name, an instance id, or an IP. Names win; an id
 /// or IP shared by several records (a reused address) is ambiguous unless
 /// exactly one is live. An IP gpuprov has no record of becomes a bare
 /// [`Target::Address`] (network probes only).
-pub fn resolve(db: &Db, target: &str) -> Result<Target, ResolveError> {
-    let records = db.list()?;
+pub async fn resolve(db: &dyn StateStore, target: &str) -> Result<Target, ResolveError> {
+    let records = db.list().await?;
     if let Some(record) = records.iter().find(|r| r.name == target) {
         return Ok(Target::Vm(Box::new(record.clone())));
     }
@@ -202,9 +202,10 @@ pub fn resolve(db: &Db, target: &str) -> Result<Target, ResolveError> {
 
 /// The records `gpuprov health` checks when given no target: every VM that
 /// may still exist at a vendor.
-pub fn live_records(db: &Db) -> Result<Vec<VmRecord>, rusqlite::Error> {
+pub async fn live_records(db: &dyn StateStore) -> Result<Vec<VmRecord>, StoreError> {
     Ok(db
-        .list()?
+        .list()
+        .await?
         .into_iter()
         .filter(|r| r.state != VmState::Terminated && r.region.is_some())
         .collect())

@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use gpu_provisioner::config::AppConfig;
-use gpu_provisioner::db::{Db, VmState};
+use gpu_provisioner::db::{SqliteStore, StateStore, VmState};
 use gpu_provisioner::machine::{Cancel, Executor};
 use gpu_provisioner::planner;
 use gpu_provisioner::provider::{self, BootScript, CloudProvider, SshEndpoint};
@@ -113,7 +113,7 @@ impl Connector for RecordingConnector {
 pub struct Run {
     pub name: String,
     pub paths: Paths,
-    pub db: Db,
+    pub db: SqliteStore,
     pub provider: Box<dyn CloudProvider>,
     pub connector: RecordingConnector,
     pub spec: VmSpec,
@@ -128,7 +128,7 @@ impl Run {
             base: dir.path().join("gpuprov"),
         };
         paths.ensure_dirs().unwrap();
-        let db = Db::open(&paths.db_path()).unwrap();
+        let db = SqliteStore::open(&paths.db_path()).unwrap();
         let config = stub.config();
         let provider = provider::build(S::CLOUD, &config)
             .await
@@ -192,7 +192,7 @@ impl Run {
     }
 
     pub async fn down(&self) -> TeardownState {
-        let record = self.db.get(&self.name).unwrap().expect("vms row");
+        let record = self.db.get(&self.name).await.unwrap().expect("vms row");
         let start = TeardownState::for_record(&record).expect("row has a location");
         let machine = TeardownMachine {
             provider: &*self.provider,
@@ -207,9 +207,10 @@ impl Run {
     }
 
     /// The journal, for failure messages.
-    pub fn journal(&self) -> String {
+    pub async fn journal(&self) -> String {
         self.db
             .machine_events(&self.name, 200)
+            .await
             .unwrap()
             .into_iter()
             .map(|e| match e.detail {
@@ -221,20 +222,23 @@ impl Run {
     }
 }
 
-fn ready(run: &Run, end: LaunchState) -> ReadyVm {
+async fn ready(run: &Run, end: LaunchState) -> ReadyVm {
     match end {
         LaunchState::Ready(vm) => vm,
-        other => panic!("expected Ready, got {other:?}\njournal:\n{}", run.journal()),
+        other => panic!(
+            "expected Ready, got {other:?}\njournal:\n{}",
+            run.journal().await
+        ),
     }
 }
 
-fn assert_no_leftovers<S: VendorStub>(stub: &S, run: &Run) {
+async fn assert_no_leftovers<S: VendorStub>(stub: &S, run: &Run) {
     let left = stub.leftovers();
     assert!(
         left.is_empty(),
         "{}: billable resources left behind: {left:?}\njournal:\n{}",
         S::CLOUD,
-        run.journal()
+        run.journal().await
     );
 }
 
@@ -242,7 +246,7 @@ fn assert_no_leftovers<S: VendorStub>(stub: &S, run: &Run) {
 pub async fn lifecycle<S: VendorStub>() {
     let stub = S::start().await;
     let run = Run::new(&stub, "stub-life").await;
-    let vm = ready(&run, run.launch(Cancel::new()).await);
+    let vm = ready(&run, run.launch(Cancel::new()).await).await;
 
     let (user, port) = stub.expected_login();
     assert_eq!(vm.user(), user, "{}: login user", S::CLOUD);
@@ -259,12 +263,20 @@ pub async fn lifecycle<S: VendorStub>() {
         "{}: exactly one instance created",
         S::CLOUD
     );
-    assert_eq!(run.db.get(&run.name).unwrap().unwrap().state, VmState::Up);
-
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
-    assert_no_leftovers(&stub, &run);
     assert_eq!(
-        run.db.get(&run.name).unwrap().unwrap().state,
+        run.db.get(&run.name).await.unwrap().unwrap().state,
+        VmState::Up
+    );
+
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
+    assert_no_leftovers(&stub, &run).await;
+    assert_eq!(
+        run.db.get(&run.name).await.unwrap().unwrap().state,
         VmState::Terminated
     );
 }
@@ -274,24 +286,32 @@ pub async fn capacity_failover<S: VendorStub>() {
     let stub = S::start().await;
     stub.fail_next_create_with_capacity();
     let run = Run::new(&stub, "stub-fail").await;
-    let vm = ready(&run, run.launch(Cancel::new()).await);
+    let vm = ready(&run, run.launch(Cancel::new()).await).await;
     assert_eq!(
         stub.creates(),
         1,
         "{}: the failed create must not leave an instance",
         S::CLOUD
     );
-    let journal = run.journal();
+    let journal = run.journal().await;
     assert!(
         journal.contains("Capacity"),
         "{}: the first offer should fail with a capacity error:\n{journal}",
         S::CLOUD
     );
-    assert_eq!(run.db.get(&run.name).unwrap().unwrap().state, VmState::Up);
+    assert_eq!(
+        run.db.get(&run.name).await.unwrap().unwrap().state,
+        VmState::Up
+    );
     drop(vm);
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
-    assert_no_leftovers(&stub, &run);
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
+    assert_no_leftovers(&stub, &run).await;
 }
 
 /// Cancel while booting → compensation → nothing left.
@@ -306,6 +326,7 @@ pub async fn interrupt<S: VendorStub>() {
             let label = run
                 .db
                 .load_machine(&run.name)
+                .await
                 .unwrap()
                 .map(|row| row.label)
                 .unwrap_or_default();
@@ -325,7 +346,7 @@ pub async fn interrupt<S: VendorStub>() {
         interrupted,
         "{}: never reached booting; ended in {end:?}\njournal:\n{}",
         S::CLOUD,
-        run.journal()
+        run.journal().await
     );
     match &end {
         LaunchState::Aborted { reason, .. } => {
@@ -334,23 +355,28 @@ pub async fn interrupt<S: VendorStub>() {
         other => panic!(
             "{}: expected a cancelled launch, got {other:?}\njournal:\n{}",
             S::CLOUD,
-            run.journal()
+            run.journal().await
         ),
     }
-    assert_no_leftovers(&stub, &run);
+    assert_no_leftovers(&stub, &run).await;
 }
 
 /// A second provision of the same name adopts the running instance.
 pub async fn reuse<S: VendorStub>() {
     let stub = S::start().await;
     let run = Run::new(&stub, "stub-reuse").await;
-    let first = ready(&run, run.launch(Cancel::new()).await);
-    let second = ready(&run, run.launch(Cancel::new()).await);
+    let first = ready(&run, run.launch(Cancel::new()).await).await;
+    let second = ready(&run, run.launch(Cancel::new()).await).await;
     assert!(second.reused, "{}: second provision should reuse", S::CLOUD);
     assert_eq!(second.instance_id, first.instance_id);
     assert_eq!(stub.creates(), 1, "{}: no second create", S::CLOUD);
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
-    assert_no_leftovers(&stub, &run);
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
+    assert_no_leftovers(&stub, &run).await;
 }
 
 /// Probes that always succeed: the stub has no real host behind it.
@@ -383,9 +409,9 @@ impl HealthProbes for ReachableProbes {
 pub async fn health<S: VendorStub>() {
     let stub = S::start().await;
     let run = Run::new(&stub, "stub-health").await;
-    ready(&run, run.launch(Cancel::new()).await);
+    ready(&run, run.launch(Cancel::new()).await).await;
 
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
     let report = health::check(
         Some(&*run.provider),
         &record,
@@ -415,8 +441,13 @@ pub async fn health<S: VendorStub>() {
         S::CLOUD
     );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
-    assert_no_leftovers(&stub, &run);
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
+    assert_no_leftovers(&stub, &run).await;
 }
 
 /// A boot script reaches the vendor natively and is fully cleaned up. The
@@ -436,7 +467,7 @@ pub async fn boot_script<S: VendorStub>() {
         script: "#!/usr/bin/env bash\necho gpuprov-boot-marker\n".into(),
         env: vec![("GPUPROV_MARKER".into(), "on".into())],
     });
-    ready(&run, run.launch_with(&machine, Cancel::new()).await);
+    ready(&run, run.launch_with(&machine, Cancel::new()).await).await;
 
     let payloads = stub.boot_payloads();
     assert!(
@@ -447,8 +478,13 @@ pub async fn boot_script<S: VendorStub>() {
         S::CLOUD
     );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
-    assert_no_leftovers(&stub, &run);
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
+    assert_no_leftovers(&stub, &run).await;
 }
 
 /// Generate the scenario tests for a vendor stub type.

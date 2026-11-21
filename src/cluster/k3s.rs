@@ -366,9 +366,11 @@ impl Machine for K3sMachine<'_> {
         }
     }
 
-    fn on_retries_exhausted(&self, s: &K3sState, last_error: String) -> K3sState {
+    async fn on_retries_exhausted(&self, s: &K3sState, last_error: String) -> K3sState {
         match s {
-            K3sState::Vm(child) => self.lift(self.launch.on_retries_exhausted(child, last_error)),
+            K3sState::Vm(child) => {
+                self.lift(self.launch.on_retries_exhausted(child, last_error).await)
+            }
             K3sState::CheckingBootInstall { vm }
             | K3sState::Installing { vm, .. }
             | K3sState::AwaitingApi { vm }
@@ -391,7 +393,7 @@ impl Machine for K3sMachine<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::db::{SqliteStore, StateStore};
     use crate::machine::{Cancel, Executor};
     use crate::provider::fake::{Behavior, FakeProvider};
     use crate::provider::{InstanceSpec, ProviderError, ResourceAsk, ResourceRequest};
@@ -411,7 +413,11 @@ mod tests {
         }
     }
 
-    fn launch<'a>(provider: &'a FakeProvider, db: &'a Db, paths: &'a Paths) -> LaunchMachine<'a> {
+    fn launch<'a>(
+        provider: &'a FakeProvider,
+        db: &'a dyn StateStore,
+        paths: &'a Paths,
+    ) -> LaunchMachine<'a> {
         LaunchMachine {
             provider,
             db,
@@ -454,7 +460,7 @@ mod tests {
     #[test]
     fn access_mode_follows_provider_capabilities() {
         let (_dir, paths) = paths();
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
 
         let open = FakeProvider::new(vec![]);
         let machine = K3sMachine::new(launch(&open, &db, &paths), &paths);
@@ -472,7 +478,7 @@ mod tests {
     #[test]
     fn installer_becomes_the_boot_script_only_on_clouds_that_run_one() {
         let (_dir, paths) = paths();
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
 
         let mut booting = FakeProvider::new(vec![]);
         booting.boot_script = true;
@@ -507,7 +513,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn vm_failure_lifts_into_cluster_failure_without_installing() {
         let (_dir, paths) = paths();
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
         let provider = FakeProvider::new(vec![(
             "r1",
             Behavior::CreateFails(ProviderError::capacity("full")),
@@ -525,17 +531,17 @@ mod tests {
             other => panic!("expected Failed without VM, got {other:?}"),
         }
         // One journal row for the whole nested run, kind k3s.
-        assert_eq!(db.load_machine("vm1").unwrap().unwrap().kind, "k3s");
+        assert_eq!(db.load_machine("vm1").await.unwrap().unwrap().kind, "k3s");
     }
 
     /// A launch that ends any way but `Ready` ends the cluster, whichever
     /// path it ends on: a step, spent retries, or a cancel's compensation.
     /// (Spent retries on a failed teardown used to nest `Vm(Leaked)`, which
     /// is not terminal for the cluster, and the next step panicked.)
-    #[test]
-    fn a_finished_launch_never_stays_nested() {
+    #[tokio::test]
+    async fn a_finished_launch_never_stays_nested() {
         let (_dir, paths) = paths();
-        let db = Db::open_in_memory().unwrap();
+        let db = SqliteStore::open_in_memory().unwrap();
         let provider = FakeProvider::new(vec![]);
         let machine = K3sMachine::new(launch(&provider, &db, &paths), &paths);
         let leaked = LaunchState::Leaked {
@@ -559,7 +565,9 @@ mod tests {
             K3sState::Vm(LaunchState::Planning),
             K3sState::Vm(LaunchState::Reconciling),
         ] {
-            let next = machine.on_retries_exhausted(&state, "unauthorized".into());
+            let next = machine
+                .on_retries_exhausted(&state, "unauthorized".into())
+                .await;
             if let K3sState::Vm(child) = &next {
                 assert!(!child.is_terminal(), "nested terminal {next:?}");
             }

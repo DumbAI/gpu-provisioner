@@ -14,8 +14,9 @@
 //!       provider::{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, nebius, verda, primeintellect, runpod, docker} ── the only code that talks to a cloud
 //! ```
 //!
-//! Supporting subsystems: `ssh` (keys, probe, runner, ssh-config), `db` (local
-//! SQLite projection + machine journal), `planner`/`spec` (request
+//! Supporting subsystems: `ssh` (keys, probe, runner, ssh-config), `db` (the
+//! state store — projection, machine journal and lease — on SQLite or
+//! Postgres), `planner`/`spec` (request
 //! validation), `config` (CLI config file), `userdata` (cloud-init), `kube`
 //! (k3s installer and kubeconfig handling). Design:
 //! `doc/STATE_MACHINE_DESIGN.md`.

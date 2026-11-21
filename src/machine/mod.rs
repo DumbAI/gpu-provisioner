@@ -4,9 +4,10 @@
 //! enum plus a `step` function — and this module supplies everything that
 //! must be right exactly once:
 //!
-//! - **write-ahead journaling**: each transition is persisted (SQLite
-//!   `machines` + `machine_events`) before the next step's side effects run,
-//!   so a crash or Ctrl-C resumes from the last durable state;
+//! - **write-ahead journaling**: each transition is persisted (the state
+//!   store's `machines` + `machine_events`, see `db`) before the next step's
+//!   side effects run, so a crash or Ctrl-C resumes from the last durable
+//!   state;
 //! - **retry budgets with exponential backoff** for transient failures, with
 //!   the machine naming the failure state when the budget runs out;
 //! - **polling** (`Step::Poll`) that consumes no budget, with the elapsed
@@ -14,8 +15,10 @@
 //! - **cancellation at step boundaries only** — an in-flight cloud call is
 //!   never dropped (that would lose the handle it returns); the machine maps
 //!   the cancelled state to a compensating one via `on_cancel`;
-//! - a **single-writer lease** per key so two processes never drive the same
-//!   VM concurrently.
+//! - a **single-writer lease** per key so two runs (processes, hosts) never
+//!   drive the same VM concurrently, **fenced**: a run whose lease was taken
+//!   over (it stalled past the staleness window) stops at its next journal
+//!   write or heartbeat with `StoreError::LeaseLost` instead of continuing.
 //!
 //! Design rationale and diagrams: `doc/STATE_MACHINE_DESIGN.md` §4.2.
 
@@ -30,7 +33,7 @@ use serde::Serialize;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::db::{Db, LeaseError, LEASE_STALE_SECS};
+use crate::db::{JournalEntry, LeaseOwner, StateStore, StoreError, LEASE_STALE_SECS};
 
 /// Lease refresh cadence during a step — well inside the staleness window.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(LEASE_STALE_SECS as u64 / 3);
@@ -116,8 +119,9 @@ pub trait Machine: Send + Sync {
         RetryPolicy::default()
     }
 
-    /// The state to move to when `state`'s retry budget is spent.
-    fn on_retries_exhausted(&self, state: &Self::State, last_error: String) -> Self::State;
+    /// The state to move to when `state`'s retry budget is spent. Async
+    /// because the failure state may be projected (e.g. a `FAILED` row).
+    async fn on_retries_exhausted(&self, state: &Self::State, last_error: String) -> Self::State;
 
     /// The state to move to when the user cancels while in `state`; `None`
     /// stops right away, leaving the journal resumable.
@@ -161,38 +165,58 @@ impl Cancel {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecError {
+    /// Includes [`StoreError::Busy`] (another run holds the lease) and
+    /// [`StoreError::LeaseLost`] (this run was fenced off).
     #[error(transparent)]
-    Lease(#[from] LeaseError),
-    #[error("state db error: {0}")]
-    Db(#[from] rusqlite::Error),
+    Store(#[from] StoreError),
     #[error("cannot (de)serialize machine state: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("interrupted; resume by re-running the same command")]
     Interrupted,
 }
 
+impl ExecError {
+    /// This run's lease was taken over and it stopped without writing.
+    pub fn is_lease_lost(&self) -> bool {
+        matches!(self, ExecError::Store(StoreError::LeaseLost { .. }))
+    }
+}
+
 /// Drives one machine instance (keyed by VM name) to a terminal state.
 pub struct Executor<'a, M: Machine> {
     machine: &'a M,
-    db: &'a Db,
+    store: &'a dyn StateStore,
     key: String,
     cancel: Cancel,
+    /// This executor's lease identity (fresh per executor).
+    owner: LeaseOwner,
 }
 
 impl<'a, M: Machine> Executor<'a, M> {
-    pub fn new(machine: &'a M, db: &'a Db, key: impl Into<String>, cancel: Cancel) -> Self {
+    pub fn new(
+        machine: &'a M,
+        store: &'a dyn StateStore,
+        key: impl Into<String>,
+        cancel: Cancel,
+    ) -> Self {
         Executor {
             machine,
-            db,
+            store,
             key: key.into(),
             cancel,
+            owner: LeaseOwner::new(),
         }
+    }
+
+    /// The identity this executor holds the key's lease under.
+    pub fn owner(&self) -> &LeaseOwner {
+        &self.owner
     }
 
     /// The journaled state for this key if it belongs to this machine kind
     /// and is still in flight (i.e. should be resumed rather than restarted).
-    pub fn resumable(&self) -> Result<Option<M::State>, ExecError> {
-        match self.db.load_machine(&self.key)? {
+    pub async fn resumable(&self) -> Result<Option<M::State>, ExecError> {
+        match self.store.load_machine(&self.key).await? {
             Some(row) if row.kind == M::KIND && !row.terminal => {
                 Ok(Some(serde_json::from_str(&row.state_json)?))
             }
@@ -203,25 +227,38 @@ impl<'a, M: Machine> Executor<'a, M> {
     /// Resume an in-flight run for this key if there is one, else start from
     /// `initial`; run to a terminal state and return it.
     pub async fn run(&self, initial: M::State) -> Result<M::State, ExecError> {
-        self.db.acquire_lease(&self.key, M::KIND)?;
-        let start = match self.resumable()? {
-            Some(state) => {
-                tracing::info!(
-                    "[{}] resuming interrupted operation at: {}",
-                    self.key,
-                    self.machine.label(&state)
-                );
-                state
+        self.store
+            .acquire_lease(&self.key, M::KIND, &self.owner)
+            .await?;
+        let result = async {
+            let start = match self.resumable().await? {
+                Some(state) => {
+                    tracing::info!(
+                        "[{}] resuming interrupted operation at: {}",
+                        self.key,
+                        self.machine.label(&state)
+                    );
+                    state
+                }
+                None => initial,
+            };
+            self.drive(start).await
+        }
+        .await;
+        if let Err(e) = &result {
+            if e.is_lease_lost() {
+                tracing::error!("[{}] {e}", self.key);
             }
-            None => initial,
-        };
-        let result = self.drive(start).await;
-        self.db.release_lease(&self.key)?;
-        result
+        }
+        // A no-op when the lease was lost (it is someone else's now).
+        let released = self.store.release_lease(&self.key, &self.owner).await;
+        let end = result?;
+        released?;
+        Ok(end)
     }
 
     async fn drive(&self, mut state: M::State) -> Result<M::State, ExecError> {
-        self.persist(&state)?;
+        self.persist(&state).await?;
         let mut entered = Instant::now();
         let mut retries: u32 = 0;
         let mut cancel_applied = false;
@@ -239,7 +276,7 @@ impl<'a, M: Machine> Executor<'a, M> {
                             self.key,
                             self.machine.label(&next)
                         );
-                        self.persist(&next)?;
+                        self.persist(&next).await?;
                         state = next;
                         entered = Instant::now();
                         retries = 0;
@@ -255,22 +292,22 @@ impl<'a, M: Machine> Executor<'a, M> {
             };
             match self.step_with_heartbeat(&state, &cx).await? {
                 Step::Next(next) => {
-                    self.persist(&next)?;
+                    self.persist(&next).await?;
                     state = next;
                     entered = Instant::now();
                     retries = 0;
                 }
                 Step::Poll { after, note } => {
                     tracing::debug!("[{}] {}: {note}", self.key, self.machine.label(&state));
-                    self.db.heartbeat(&self.key)?;
+                    self.heartbeat().await?;
                     self.cancel.sleep(after).await;
                 }
                 Step::Retry { error } => {
                     retries += 1;
                     let policy = self.machine.retry_policy(&state);
                     if retries >= policy.max_attempts {
-                        let next = self.machine.on_retries_exhausted(&state, error);
-                        self.persist(&next)?;
+                        let next = self.machine.on_retries_exhausted(&state, error).await;
+                        self.persist(&next).await?;
                         state = next;
                         entered = Instant::now();
                         retries = 0;
@@ -283,7 +320,7 @@ impl<'a, M: Machine> Executor<'a, M> {
                             policy.max_attempts,
                             backoff.as_secs()
                         );
-                        self.db.heartbeat(&self.key)?;
+                        self.heartbeat().await?;
                         self.cancel.sleep(backoff).await;
                     }
                 }
@@ -304,23 +341,35 @@ impl<'a, M: Machine> Executor<'a, M> {
         loop {
             tokio::select! {
                 outcome = &mut step => return Ok(outcome),
-                _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => self.db.heartbeat(&self.key)?,
+                // A lost lease drops the in-flight step: this run must not
+                // act any further (the new owner observes before acting).
+                _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => self.heartbeat().await?,
             }
         }
     }
 
-    fn persist(&self, state: &M::State) -> Result<(), ExecError> {
+    async fn heartbeat(&self) -> Result<(), ExecError> {
+        Ok(self.store.heartbeat(&self.key, &self.owner).await?)
+    }
+
+    async fn persist(&self, state: &M::State) -> Result<(), ExecError> {
         let label = self.machine.label(state);
         let detail = self.machine.detail(state);
+        let state_json = serde_json::to_string(state)?;
         tracing::info!("[{}] {label}", self.key);
-        self.db.save_machine(
-            &self.key,
-            M::KIND,
-            &serde_json::to_string(state)?,
-            &label,
-            self.machine.is_terminal(state),
-            detail.as_deref(),
-        )?;
+        self.store
+            .save_machine(
+                &self.key,
+                &self.owner,
+                JournalEntry {
+                    kind: M::KIND,
+                    state_json: &state_json,
+                    label: &label,
+                    terminal: self.machine.is_terminal(state),
+                    detail: detail.as_deref(),
+                },
+            )
+            .await?;
         Ok(())
     }
 }
@@ -332,6 +381,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+    use crate::db::{seed_machine, SqliteStore};
 
     /// Toy machine: `Count(n)` → `Count(n+1)` until `Done`; scripted
     /// per-state outcomes let tests inject polls and transient failures.
@@ -411,7 +461,7 @@ mod tests {
             }
         }
 
-        fn on_retries_exhausted(&self, _s: &Toy, last_error: String) -> Toy {
+        async fn on_retries_exhausted(&self, _s: &Toy, last_error: String) -> Toy {
             Toy::GaveUp(last_error)
         }
 
@@ -420,8 +470,8 @@ mod tests {
         }
     }
 
-    fn db() -> Db {
-        Db::open_in_memory().unwrap()
+    fn db() -> SqliteStore {
+        SqliteStore::open_in_memory().unwrap()
     }
 
     #[tokio::test(start_paused = true)]
@@ -438,6 +488,7 @@ mod tests {
         assert_eq!(end, Toy::Done);
         let labels: Vec<String> = db
             .machine_events("k", 100)
+            .await
             .unwrap()
             .into_iter()
             .map(|e| e.label)
@@ -447,7 +498,7 @@ mod tests {
             labels,
             ["Count(0)", "Count(1)", "Count(2)", "Waiting", "Done"]
         );
-        assert!(db.load_machine("k").unwrap().unwrap().terminal);
+        assert!(db.load_machine("k").await.unwrap().unwrap().terminal);
     }
 
     #[tokio::test(start_paused = true)]
@@ -476,8 +527,7 @@ mod tests {
     async fn resumes_from_journaled_non_terminal_state() {
         let db = db();
         // A previous process crashed in Count(2).
-        db.save_machine("k", "toy", r#"{"Count":2}"#, "Count(2)", false, None)
-            .unwrap();
+        seed_machine(&db, "k", "toy", r#"{"Count":2}"#, "Count(2)", false).await;
         let machine = ToyMachine::default();
         let end = Executor::new(&machine, &db, "k", Cancel::new())
             .run(Toy::Count(0))
@@ -495,8 +545,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn terminal_or_foreign_journal_rows_are_not_resumed() {
         let db = db();
-        db.save_machine("k", "other-kind", r#"{"Count":2}"#, "x", false, None)
-            .unwrap();
+        seed_machine(&db, "k", "other-kind", r#"{"Count":2}"#, "x", false).await;
         let machine = ToyMachine::default();
         Executor::new(&machine, &db, "k", Cancel::new())
             .run(Toy::Count(0))
@@ -536,7 +585,7 @@ mod tests {
             exec.run(Toy::Count(0)).await,
             Err(ExecError::Interrupted)
         ));
-        assert_eq!(exec.resumable().unwrap(), Some(Toy::Count(2)));
+        assert_eq!(exec.resumable().await.unwrap(), Some(Toy::Count(2)));
     }
 
     #[test]

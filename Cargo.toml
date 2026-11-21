@@ -39,10 +39,16 @@ aws-sdk-ec2 = "1"
 aws-sdk-ssm = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+deadpool-postgres = "0.14"
 dirs = "5"
+gethostname = "1"
 rand_core = { version = "0.6", features = ["std"] }
 reqwest = { version = "0.13", features = ["json", "query"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
+# The Postgres state store: TLS with the ring provider and the system's roots
+# (no aws-lc build step for this one dependency).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -57,6 +63,8 @@ tokio = { version = "1", features = [
     "io-util",
     "signal",
 ] }
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.14"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

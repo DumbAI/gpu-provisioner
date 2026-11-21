@@ -32,7 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpu_provisioner::cluster::k3s::{K3sMachine, K3sState};
 use gpu_provisioner::config::AppConfig;
-use gpu_provisioner::db::{Db, VmState};
+use gpu_provisioner::db::{SqliteStore, StateStore, VmState};
 use gpu_provisioner::machine::{Cancel, Executor};
 use gpu_provisioner::planner;
 use gpu_provisioner::provider::{self, CloudProvider, Location};
@@ -106,7 +106,7 @@ struct Run {
     name: String,
     _dir: tempfile::TempDir,
     paths: Paths,
-    db: Db,
+    db: SqliteStore,
     provider: Box<dyn CloudProvider>,
     spec: VmSpec,
     settings: Settings,
@@ -119,7 +119,7 @@ impl Run {
             base: dir.path().join("gpuprov"),
         };
         paths.ensure_dirs().unwrap();
-        let db = Db::open(&paths.db_path()).unwrap();
+        let db = SqliteStore::open(&paths.db_path()).unwrap();
         let provider = provider::build(&settings.cloud, &settings.config)
             .await
             .expect("provider credentials");
@@ -176,8 +176,8 @@ impl Run {
     }
 
     /// Where the VM's resources live, per the local record.
-    fn location(&self) -> Option<Location> {
-        let record = self.db.get(&self.name).unwrap()?;
+    async fn location(&self) -> Option<Location> {
+        let record = self.db.get(&self.name).await.unwrap()?;
         Some(Location {
             region: record.region?,
             zone: record.zone.filter(|z| !z.is_empty()),
@@ -185,7 +185,7 @@ impl Run {
     }
 
     async fn teardown(&self) -> TeardownState {
-        let Some(record) = self.db.get(&self.name).unwrap() else {
+        let Some(record) = self.db.get(&self.name).await.unwrap() else {
             return TeardownState::Done;
         };
         let Some(start) = TeardownState::for_record(&record) else {
@@ -205,7 +205,7 @@ impl Run {
 
     /// Assert the cloud reports nothing left for the VM at its location.
     async fn assert_nothing_left(&self) {
-        let Some(location) = self.location() else {
+        let Some(location) = self.location().await else {
             return;
         };
         let left = self
@@ -225,8 +225,8 @@ impl Run {
     }
 
     /// Print the journaled transitions with elapsed seconds.
-    fn report(&self, test: &str) {
-        let events = self.db.machine_events(&self.name, 500).unwrap();
+    async fn report(&self, test: &str) {
+        let events = self.db.machine_events(&self.name, 500).await.unwrap();
         let start = events.first().map(|e| e.ts).unwrap_or_default();
         eprintln!("== {test} on {} ({}) ==", self.settings.cloud, self.name);
         for event in &events {
@@ -312,7 +312,7 @@ async fn full_lifecycle() {
                 vm
             }
             other => {
-                run.report("full_lifecycle");
+                run.report("full_lifecycle").await;
                 panic!("cluster did not become ready: {other:?}");
             }
         }
@@ -324,12 +324,15 @@ async fn full_lifecycle() {
         {
             LaunchState::Ready(vm) => vm,
             other => {
-                run.report("full_lifecycle");
+                run.report("full_lifecycle").await;
                 panic!("VM did not become ready: {other:?}");
             }
         }
     };
-    assert_eq!(run.db.get(&run.name).unwrap().unwrap().state, VmState::Up);
+    assert_eq!(
+        run.db.get(&run.name).await.unwrap().unwrap().state,
+        VmState::Up
+    );
 
     // 3. Real SSH works; a GPU ask actually has a GPU.
     let (ok, out) = ssh_capture(&vm, "uname -a").await;
@@ -346,10 +349,10 @@ async fn full_lifecycle() {
     guard.armed = false;
     run.assert_nothing_left().await;
     assert_eq!(
-        run.db.get(&run.name).unwrap().unwrap().state,
+        run.db.get(&run.name).await.unwrap().unwrap().state,
         VmState::Terminated
     );
-    run.report("full_lifecycle");
+    run.report("full_lifecycle").await;
 }
 
 #[tokio::test]
@@ -372,6 +375,7 @@ async fn interrupted_provision_cleans_up() {
             let label = run
                 .db
                 .load_machine(&run.name)
+                .await
                 .unwrap()
                 .map(|row| row.label)
                 .unwrap_or_default();
@@ -390,7 +394,7 @@ async fn interrupted_provision_cleans_up() {
     let executor = Executor::new(&launch, &run.db, &run.name, cancel);
     let (end, interrupted) = tokio::join!(executor.run(LaunchState::Reconciling), watcher);
     let end = end.unwrap();
-    run.report("interrupted_provision_cleans_up");
+    run.report("interrupted_provision_cleans_up").await;
     assert!(
         interrupted,
         "launch never reached Booting; ended in {end:?}"

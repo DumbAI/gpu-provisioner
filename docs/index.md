@@ -32,7 +32,7 @@ $ gpuprov down dev
   tears down the partial attempt and moves on, and a quota error skips the whole
   region. If teardown cannot be confirmed, the VM is recorded as `LEAKED`
   instead of being forgotten.
-- **Durable state machines.** Every operation is journaled in local SQLite. Ctrl-C
+- **Durable state machines.** Every operation is journaled (local SQLite for the CLI; Postgres for [embedders](guides/library.md)). Ctrl-C
   cleans up what the run created, and a crash resumes from the last state. It never
   creates a second instance, because every step observes the cloud before it acts.
   See [State machines](architecture/state-machines.md).

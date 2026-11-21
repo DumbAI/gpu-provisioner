@@ -36,6 +36,7 @@
 //! (with a `natIP`) after one list and `RUNNING` after the next. Login is
 //! `ubuntu`@22 (from the `ssh-keys` metadata).
 
+use gpu_provisioner::db::StateStore;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -787,9 +788,9 @@ async fn health_reads_spot_preemption_and_maintenance() {
     assert!(
         matches!(end, LaunchState::Ready(_)),
         "{end:?}\n{}",
-        run.journal()
+        run.journal().await
     );
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
     let check = || {
         health::check(
             Some(&*run.provider),
@@ -828,7 +829,12 @@ async fn health_reads_spot_preemption_and_maintenance() {
         "{report:#?}"
     );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
 }
 

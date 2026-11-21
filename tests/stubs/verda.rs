@@ -30,6 +30,7 @@
 
 use async_trait::async_trait;
 use gpu_provisioner::config::{AppConfig, VerdaConfig};
+use gpu_provisioner::db::StateStore;
 use serde_json::{json, Value};
 
 use super::harness::{vendor_suite, Ask, VendorStub};
@@ -673,9 +674,9 @@ async fn health_reads_spot_and_discontinued() {
     assert!(
         matches!(end, LaunchState::Ready(_)),
         "{end:?}\n{}",
-        run.journal()
+        run.journal().await
     );
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
     let check = || {
         health::check(
             Some(&*run.provider),
@@ -701,7 +702,12 @@ async fn health_reads_spot_and_discontinued() {
     assert!(has(&report, "discontinued by Verda"), "{report:#?}");
 
     // Teardown after an eviction: nothing to delete, detached volumes swept.
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
 }
 

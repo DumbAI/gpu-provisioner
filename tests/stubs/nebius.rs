@@ -37,6 +37,7 @@
 //! finishes before the VM boots, and that a capacity failure arrives as the
 //! operation's status rather than as the create's HTTP answer.
 
+use gpu_provisioner::db::StateStore;
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -754,7 +755,7 @@ async fn tenant_and_projects_are_discovered() {
     run.spec.regions = vec!["us-central1".into()];
     let end = run.launch(Cancel::new()).await;
     let LaunchState::Ready(vm) = end else {
-        panic!("{end:?}\n{}", run.journal());
+        panic!("{end:?}\n{}", run.journal().await);
     };
     assert_eq!(vm.offer.region, "us-central1");
     let calls = stub.server.calls();
@@ -762,7 +763,12 @@ async fn tenant_and_projects_are_discovered() {
         calls.contains(&"GET /iam/v1/tenants".to_string()),
         "{calls:?}"
     );
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty());
 }
 
@@ -784,14 +790,14 @@ async fn spot_vms_are_preemptible_and_preemption_is_diagnosed() {
     assert!(
         matches!(end, LaunchState::Ready(_)),
         "{end:?}\n{}",
-        run.journal()
+        run.journal().await
     );
     let bodies = stub.create_bodies();
     assert_eq!(bodies[0]["spec"]["preemptible"]["onPreemption"], "STOP");
     assert_eq!(bodies[0]["spec"]["followsSpotPrice"], json!({}));
 
     stub.preempt();
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
     let report = health::check(
         Some(&*run.provider),
         &record,
@@ -804,7 +810,12 @@ async fn spot_vms_are_preemptible_and_preemption_is_diagnosed() {
         report.checks.iter().any(|c| c.detail.contains("preempted")),
         "{report:#?}"
     );
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
 }
 

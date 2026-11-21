@@ -94,6 +94,23 @@ For cluster VMs, re-runs the cluster steps (install check with SSH fallback, API
 wait, kubeconfig fetch, and validation) and rewrites
 `~/.gpu-provisioner/kube/<NAME>.yaml`.
 
+## `gpuprov state migrate --to <URL> [--schema gpuprov]`
+
+Copies the local SQLite state (VM records, the operation journal and its
+history) into a Postgres state store, for programs that embed gpuprov with
+its state in Postgres (see [Embedding gpuprov](library.md)). The URL is a
+libpq-style `postgres://` URL; `sslrootcert=<pem>` trusts a provider CA.
+
+- Refuses while an operation is in flight under a live lease (a running
+  `gpuprov`); let it finish and re-run.
+- Never overwrites: records and journals already in Postgres are kept, and a
+  VM's history is copied only when Postgres has none for it. Everything is one
+  transaction, so a rerun is safe and copies only what is new.
+- Leases are not copied. Interrupted operations are listed: they resume from
+  Postgres on the embedder's next run, so do not also resume them with the CLI.
+
+The CLI itself keeps using SQLite.
+
 ## `gpuprov tunnel <NAME>`
 
 For clusters on clouds without inbound-port control (Massed Compute, Verda, Prime Intellect),

@@ -40,6 +40,7 @@
 
 use async_trait::async_trait;
 use gpu_provisioner::config::{ApiKeyConfig, AppConfig};
+use gpu_provisioner::db::StateStore;
 use serde_json::{json, Value};
 use wiremock::{Request, ResponseTemplate};
 
@@ -657,7 +658,7 @@ async fn cloud_firewall_is_bound_by_tag_and_removed() {
     assert!(
         matches!(end, LaunchState::Ready(_)),
         "{end:?}\n{}",
-        run.journal()
+        run.journal().await
     );
     {
         let account = stub.server.state();
@@ -685,7 +686,12 @@ async fn cloud_firewall_is_bound_by_tag_and_removed() {
             "the Droplet carries the firewall's tag"
         );
     }
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
 }
 
@@ -705,9 +711,9 @@ async fn health_flags_powered_off_droplets() {
     assert!(
         matches!(end, LaunchState::Ready(_)),
         "{end:?}\n{}",
-        run.journal()
+        run.journal().await
     );
-    let record = run.db.get(&run.name).unwrap().unwrap();
+    let record = run.db.get(&run.name).await.unwrap().unwrap();
     let check = || {
         health::check(
             Some(&*run.provider),
@@ -734,7 +740,12 @@ async fn health_flags_powered_off_droplets() {
         "{report:#?}"
     );
 
-    assert_eq!(run.down().await, TeardownState::Done, "{}", run.journal());
+    assert_eq!(
+        run.down().await,
+        TeardownState::Done,
+        "{}",
+        run.journal().await
+    );
     assert!(stub.leftovers().is_empty(), "{:?}", stub.leftovers());
 }
 

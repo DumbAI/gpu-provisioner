@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::db::Db;
+use crate::db::{seed_machine, SqliteStore};
 use crate::machine::{Cancel, Executor};
 use crate::provider::fake::{Behavior, FakeProvider};
 use crate::provider::ResourceAsk;
@@ -28,7 +28,7 @@ impl Connector for DeadConnector {
 }
 
 struct Harness {
-    db: Db,
+    db: SqliteStore,
     paths: Paths,
     _dir: tempfile::TempDir,
 }
@@ -41,7 +41,7 @@ impl Harness {
         };
         paths.ensure_dirs().unwrap();
         Harness {
-            db: Db::open_in_memory().unwrap(),
+            db: SqliteStore::open_in_memory().unwrap(),
             paths,
             _dir: dir,
         }
@@ -94,8 +94,8 @@ impl Harness {
             .unwrap()
     }
 
-    fn vm_state(&self) -> Option<VmState> {
-        self.db.get("vm1").unwrap().map(|r| r.state)
+    async fn vm_state(&self) -> Option<VmState> {
+        self.db.get("vm1").await.unwrap().map(|r| r.state)
     }
 }
 
@@ -116,7 +116,7 @@ async fn happy_path_records_up_with_ssh_config() {
     let vm = ready(&end);
     assert_eq!(vm.offer.region, "us-west-2");
     assert!(!vm.reused);
-    let rec = h.db.get("vm1").unwrap().unwrap();
+    let rec = h.db.get("vm1").await.unwrap().unwrap();
     assert_eq!(rec.state, VmState::Up);
     assert_eq!(rec.provider.as_deref(), Some("fake"));
     assert_eq!(rec.ssh_port, Some(22));
@@ -124,6 +124,7 @@ async fn happy_path_records_up_with_ssh_config() {
     // The journal tells the whole story, ending in Ready.
     let labels: Vec<String> =
         h.db.machine_events("vm1", 50)
+            .await
             .unwrap()
             .into_iter()
             .map(|e| e.label)
@@ -214,7 +215,7 @@ async fn fatal_error_compensates_then_aborts_without_trying_more_offers() {
     // Unlike the old engine, the instance created before the fatal error is
     // not left behind.
     assert_eq!(provider.live(), 0);
-    assert_eq!(h.vm_state(), Some(VmState::Failed));
+    assert_eq!(h.vm_state().await, Some(VmState::Failed));
 }
 
 #[tokio::test(start_paused = true)]
@@ -242,7 +243,7 @@ async fn boot_failure_and_boot_timeout_fail_over() {
     let end = h.run(&h.machine(&provider, "t", &["r1", "r2", "r3"])).await;
     assert_eq!(ready(&end).offer.region, "r3");
     assert_eq!(provider.live(), 1);
-    let history = match h.db.machine_events("vm1", 100) {
+    let history = match h.db.machine_events("vm1", 100).await {
         Ok(events) => events
             .into_iter()
             .filter_map(|e| e.detail)
@@ -270,7 +271,7 @@ async fn exhaustion_reports_history_and_marks_failed() {
         }
         other => panic!("expected Exhausted, got {other:?}"),
     }
-    assert_eq!(h.vm_state(), Some(VmState::Failed));
+    assert_eq!(h.vm_state().await, Some(VmState::Failed));
 }
 
 #[tokio::test(start_paused = true)]
@@ -283,7 +284,7 @@ async fn failed_teardown_is_leaked_and_cleaned_by_the_next_run() {
     *provider.delete_failures.lock().unwrap() = u32::MAX;
     let end = h.run(&h.machine(&provider, "t", &["r1", "r2"])).await;
     assert!(matches!(end, LaunchState::Leaked { .. }), "{end:?}");
-    assert_eq!(h.vm_state(), Some(VmState::Leaked));
+    assert_eq!(h.vm_state().await, Some(VmState::Leaked));
     assert_eq!(
         provider.count_calls("create:r2"),
         0,
@@ -313,15 +314,15 @@ async fn crash_while_booting_resumes_without_a_second_create() {
         search,
         instance_id: instance_id.clone(),
     };
-    h.db.save_machine(
+    seed_machine(
+        &h.db,
         "vm1",
         "vm",
         &serde_json::to_string(&crashed).unwrap(),
         "booting",
         false,
-        None,
     )
-    .unwrap();
+    .await;
 
     let end = h.run(&machine).await;
     assert_eq!(ready(&end).instance_id, instance_id);
@@ -343,8 +344,9 @@ async fn up_record_with_running_instance_is_reused() {
 async fn vm_owned_by_another_provider_aborts() {
     let h = Harness::new();
     h.db.upsert_provisioning("vm1", "aws", "us-west-2", None, "t3.micro", "{}")
+        .await
         .unwrap();
-    h.db.set_state("vm1", VmState::Up).unwrap();
+    h.db.set_state("vm1", VmState::Up).await.unwrap();
     let provider = FakeProvider::new(vec![]);
     let end = h.run(&h.machine(&provider, "t", &["r1"])).await;
     match end {
@@ -353,7 +355,7 @@ async fn vm_owned_by_another_provider_aborts() {
     }
     assert_eq!(provider.count_calls("create"), 0);
     // The other cloud's VM record is untouched.
-    assert_eq!(h.vm_state(), Some(VmState::Up));
+    assert_eq!(h.vm_state().await, Some(VmState::Up));
 }
 
 #[tokio::test(start_paused = true)]
@@ -368,7 +370,7 @@ async fn unsupported_feature_is_rejected_even_when_a_vm_could_be_reused() {
     let end = h.run(&machine).await;
     assert!(matches!(end, LaunchState::Aborted { .. }), "{end:?}");
     // The healthy VM is neither reused nor marked FAILED.
-    assert_eq!(h.vm_state(), Some(VmState::Up));
+    assert_eq!(h.vm_state().await, Some(VmState::Up));
     assert_eq!(provider.live(), 1);
 }
 
@@ -404,7 +406,7 @@ async fn provider_dictated_ssh_user_and_port_are_recorded() {
     provider.ssh_port = 2201;
     let end = h.run(&h.machine(&provider, "t", &["r1"])).await;
     assert_eq!(ready(&end).user(), "root");
-    let rec = h.db.get("vm1").unwrap().unwrap();
+    let rec = h.db.get("vm1").await.unwrap().unwrap();
     assert_eq!(rec.ssh_user.as_deref(), Some("root"));
     assert_eq!(rec.ssh_port, Some(2201));
     let config = std::fs::read_to_string(rec.ssh_config_path.unwrap()).unwrap();
@@ -424,20 +426,20 @@ async fn retry_until_up_replans_after_exhaustion() {
         error: ProviderError::capacity("full"),
     }];
     assert!(matches!(
-        machine.exhausted(history.clone()),
+        machine.exhausted(history.clone()).await,
         LaunchState::WaitingToRetry { .. }
     ));
     // ...which re-plans after the gap and succeeds once capacity is back.
     let waiting = LaunchState::WaitingToRetry { history };
-    h.db.save_machine(
+    seed_machine(
+        &h.db,
         "vm1",
         "vm",
         &serde_json::to_string(&waiting).unwrap(),
         "w",
         false,
-        None,
     )
-    .unwrap();
+    .await;
     let end = h.run(&machine).await;
     ready(&end);
 }
