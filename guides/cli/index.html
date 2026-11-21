@@ -505,6 +505,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#gpuprov-state-migrate-to-url-schema-gpuprov" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        gpuprov state migrate --to &lt;URL&gt; [--schema gpuprov]
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#gpuprov-tunnel-name" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -595,6 +606,34 @@
     
   
     Health checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../library/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Embedding gpuprov
   
 
     
@@ -1400,6 +1439,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#gpuprov-state-migrate-to-url-schema-gpuprov" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        gpuprov state migrate --to &lt;URL&gt; [--schema gpuprov]
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#gpuprov-tunnel-name" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1571,6 +1621,21 @@ re-run to resume.</p>
 <p>For cluster VMs, re-runs the cluster steps (install check with SSH fallback, API
 wait, kubeconfig fetch, and validation) and rewrites
 <code>~/.gpu-provisioner/kube/&lt;NAME&gt;.yaml</code>.</p>
+<h2 id="gpuprov-state-migrate-to-url-schema-gpuprov"><code>gpuprov state migrate --to &lt;URL&gt; [--schema gpuprov]</code><a class="headerlink" href="#gpuprov-state-migrate-to-url-schema-gpuprov" title="Permanent link">&para;</a></h2>
+<p>Copies the local SQLite state (VM records, the operation journal and its
+history) into a Postgres state store, for programs that embed gpuprov with
+its state in Postgres (see <a href="../library/">Embedding gpuprov</a>). The URL is a
+libpq-style <code>postgres://</code> URL; <code>sslrootcert=&lt;pem&gt;</code> trusts a provider CA.</p>
+<ul>
+<li>Refuses while an operation is in flight under a live lease (a running
+  <code>gpuprov</code>); let it finish and re-run.</li>
+<li>Never overwrites: records and journals already in Postgres are kept, and a
+  VM's history is copied only when Postgres has none for it. Everything is one
+  transaction, so a rerun is safe and copies only what is new.</li>
+<li>Leases are not copied. Interrupted operations are listed: they resume from
+  Postgres on the embedder's next run, so do not also resume them with the CLI.</li>
+</ul>
+<p>The CLI itself keeps using SQLite.</p>
 <h2 id="gpuprov-tunnel-name"><code>gpuprov tunnel &lt;NAME&gt;</code><a class="headerlink" href="#gpuprov-tunnel-name" title="Permanent link">&para;</a></h2>
 <p>For clusters on clouds without inbound-port control (Massed Compute, Verda, Prime Intellect),
 forwards <code>127.0.0.1:16443</code> to the node's API server. The kubeconfig of such

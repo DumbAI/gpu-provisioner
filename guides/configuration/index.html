@@ -564,6 +564,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../library/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Embedding gpuprov
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1347,7 +1375,7 @@
 <p>Everything lives under <code>~/.gpu-provisioner</code>, or under <code>$GPUPROV_HOME</code> when set:</p>
 <div class="highlight"><pre><span></span><code>~/.gpu-provisioner/
 ├── config.toml        # optional CLI config (below)
-├── state.db           # SQLite: VM rows + state-machine journal
+├── state.db           # SQLite: VM rows + state-machine journal (embedders may use Postgres: see Embedding gpuprov)
 ├── keys/              # the shared ed25519 keypair (generated on first use)
 ├── ssh/&lt;name&gt;         # per-VM ssh config, Include'd from ~/.ssh/config
 ├── sockets/           # ssh ControlMaster sockets

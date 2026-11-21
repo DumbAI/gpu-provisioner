@@ -538,6 +538,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="guides/library/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Embedding gpuprov
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1324,7 +1352,7 @@ containers with <code>kubectl</code>.</p>
   tears down the partial attempt and moves on, and a quota error skips the whole
   region. If teardown cannot be confirmed, the VM is recorded as <code>LEAKED</code>
   instead of being forgotten.</li>
-<li><strong>Durable state machines.</strong> Every operation is journaled in local SQLite. Ctrl-C
+<li><strong>Durable state machines.</strong> Every operation is journaled (local SQLite for the CLI; Postgres for <a href="guides/library/">embedders</a>). Ctrl-C
   cleans up what the run created, and a crash resumes from the last state. It never
   creates a second instance, because every step observes the cloud before it acts.
   See <a href="architecture/state-machines/">State machines</a>.</li>

@@ -471,6 +471,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/library/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Embedding gpuprov
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1624,6 +1652,16 @@ attempted:</p>
 <td>Makes k3s portable to clouds without a firewall API. Validation checks the access path the user will actually use.</td>
 </tr>
 <tr>
+<td>Where the state lives</td>
+<td>local SQLite only · an external durable-execution engine · <strong>a <code>StateStore</code> trait: SQLite for the CLI, Postgres for embedders</strong></td>
+<td>The CLI keeps the no-server wedge. An embedder (a workflow worker) must survive losing its disk mid-launch, or it could orphan paid VMs; Postgres gives it shared, durable state without changing the machines. A trait object rather than an enum: the machines need a dozen operations, each backend keeps its own connection and error handling, and the virtual call is noise next to a round trip.</td>
+</tr>
+<tr>
+<td>Lease identity and safety</td>
+<td>pid + read-then-write · <strong>per-run owner token, atomic upsert, database clock, fenced writes</strong></td>
+<td>Pids collide across hosts and a read-then-write races. Fencing makes takeover safe even when the old owner is merely slow rather than dead.</td>
+</tr>
+<tr>
 <td>Projection vs source of truth</td>
 <td>One table · <strong><code>machines</code> (journal, source of truth) + <code>vms</code> (user-facing projection)</strong></td>
 <td>The generic executor must not know VM columns. <code>vms</code> is updated idempotently by steps and can always be recomputed.</td>
@@ -1636,7 +1674,7 @@ attempted:</p>
   vm/launch.rs        LaunchMachine  = Reconcile → Plan → [Prepare → Create → Boot → Connect]* → Ready
   vm/teardown.rs      TeardownMachine= Request → AwaitGone → Cleanup → Done   (also the compensation sub-machine)
     machine/          Executor&lt;M: Machine&gt;: persist · retry budget · backoff · poll · deadline · cancel · resume
-                      Journal (SQLite `machines` + `machine_events`)
+                      Journal (`db::StateStore`: SQLite or Postgres `machines` + `machine_events`)
       provider/mod.rs CloudProvider: capabilities · plan · prepare · create · observe · delete · cleanup
         provider/{aws, gcp, massedcompute, hyperstack, lambda, digitalocean, nebius, verda, primeintellect, runpod, docker}/   — the only code that talks to a cloud API
 </code></pre></div>
@@ -1763,7 +1801,9 @@ attempted:</p>
 <li><strong>Budgets.</strong> Consecutive <code>Retry</code>s in one state are capped (<code>RetryPolicy { max_attempts, initial_backoff, max_backoff }</code>). On exhaustion the machine names the failure state; the executor never invents one. <code>Poll</code> deadlines are enforced <em>by the machine</em> using <code>cx.in_state</code> (time since entering the state in this process), so a resume gets a fresh but bounded window.</li>
 <li><strong>Cancellation at step boundaries only.</strong> Ctrl-C never drops an in-flight cloud call (that would lose the handle). Between steps, <code>on_cancel</code> maps the state to a compensating state (for example <code>Booting</code> → <code>Compensating</code>). The machine then runs to a terminal state, and a second Ctrl-C exits immediately and leaves the journal resumable.</li>
 <li><strong>Resume.</strong> <code>Executor::run</code> loads the journalled state for the key. If it is non-terminal, execution continues from it; otherwise the caller supplies a fresh initial state.</li>
+<li><strong>One fenced writer.</strong> Each <code>Executor</code> takes the key's lease under its own <code>LeaseOwner</code> (host, pid, random token) in one atomic statement: granted when unleased, already its own, terminal, or stale (no heartbeat for <code>LEASE_STALE_SECS</code> = 60 s by the store's clock), else <code>Busy</code>. It heartbeats every 20 s during steps and polls. Journal writes and heartbeats succeed only while it still owns the lease; otherwise they fail with <code>LeaseLost</code> and the run stops immediately, so a run that stalled and was taken over never writes again. The successor resumes from the journal and, by invariant 2, observes before acting.</li>
 </ol>
+<p>The store behind the journal is the <code>db::StateStore</code> trait (async, shared as <code>&amp;dyn StateStore</code>). <code>SqliteStore</code> is the CLI's local file; <code>PgStore</code> keeps the same tables in a <code>gpuprov</code> Postgres schema for embedders whose hosts have no durable disk or who run several workers. Both implement the same lease and fencing statements; one contract test suite (<code>db/tests.rs</code>) runs against each.</p>
 <h3 id="43-vm-launch-machine-vmlaunchrs">4.3 VM launch machine (<code>vm/launch.rs</code>)<a class="headerlink" href="#43-vm-launch-machine-vmlaunchrs" title="Permanent link">&para;</a></h3>
 <pre class="mermaid"><code>stateDiagram-v2
     [*] --&gt; Reconciling
