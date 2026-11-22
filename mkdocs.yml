@@ -67,6 +67,7 @@ nav:
       - RunPod: clouds/runpod.md
       - Verda: clouds/verda.md
       - Docker (local test cloud): clouds/docker.md
+      - SSH hosts (your own machines): clouds/ssh.md
   - Architecture:
       - State machines: architecture/state-machines.md
       - Adding a cloud: architecture/adding-a-cloud.md

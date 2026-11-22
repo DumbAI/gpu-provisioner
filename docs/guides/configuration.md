@@ -72,6 +72,14 @@ client_secret = "..."          # else $VERDA_CLIENT_SECRET
 [docker]
 # image = "my/sshd:tag"        # default: built locally from an embedded Dockerfile
 
+[ssh.hosts.spark]              # a machine you own (docs/clouds/ssh.md); --region spark
+host = "spark.local"
+user = "ryan"                  # passwordless sudo
+identity_file = "~/.ssh/id_ed25519"
+gpus = "GB10:1"                # what --gpus matches
+# port = 22
+# keep_k3s = false             # true: leave k3s installed on down
+
 [defaults]
 regions = ["us-west-2", "us-east-1"]   # AWS failover order when the spec has none
 disk_gb = 100
