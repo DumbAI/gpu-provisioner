@@ -987,6 +987,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../clouds/ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH hosts (your own machines)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1435,6 +1463,14 @@
 
 <span class="k">[docker]</span>
 <span class="c1"># image = "my/sshd:tag"        # default: built locally from an embedded Dockerfile</span>
+
+<span class="k">[ssh.hosts.spark]</span><span class="w">              </span><span class="c1"># a machine you own (docs/clouds/ssh.md); --region spark</span>
+<span class="n">host</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"spark.local"</span>
+<span class="n">user</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"ryan"</span><span class="w">                  </span><span class="c1"># passwordless sudo</span>
+<span class="n">identity_file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"~/.ssh/id_ed25519"</span>
+<span class="n">gpus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"GB10:1"</span><span class="w">                </span><span class="c1"># what --gpus matches</span>
+<span class="c1"># port = 22</span>
+<span class="c1"># keep_k3s = false             # true: leave k3s installed on down</span>
 
 <span class="k">[defaults]</span>
 <span class="n">regions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"us-west-2"</span><span class="p">,</span><span class="w"> </span><span class="s2">"us-east-1"</span><span class="p">]</span><span class="w">   </span><span class="c1"># AWS failover order when the spec has none</span>

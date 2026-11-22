@@ -987,6 +987,34 @@
 
               
             
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="ssh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SSH hosts (your own machines)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
           </ul>
         </nav>
       
@@ -1413,6 +1441,10 @@ adapter only maps a cloud's API onto the contract. Pick one with <code>--cloud &
 <td><code>primeintellect</code>, <code>runpod</code></td>
 </tr>
 <tr>
+<td>machines you already have (a workstation, a DGX Spark)</td>
+<td><code>ssh</code></td>
+</tr>
+<tr>
 <td>trying gpuprov without any account</td>
 <td><code>docker</code></td>
 </tr>
@@ -1521,6 +1553,14 @@ cheapest first.</p>
 <td><code>local</code></td>
 <td><code>local</code></td>
 <td>one offer</td>
+</tr>
+<tr>
+<td><a href="ssh/">SSH hosts</a></td>
+<td><code>ssh</code></td>
+<td>a machine you own, adopted</td>
+<td>the host ids in <code>[ssh.hosts]</code></td>
+<td>every configured host</td>
+<td>one offer per matching host</td>
 </tr>
 </tbody>
 </table>
@@ -1648,6 +1688,16 @@ cheapest first.</p>
 <td>✗</td>
 <td><code>ubuntu</code>@random local port</td>
 <td>—</td>
+</tr>
+<tr>
+<td>SSH hosts</td>
+<td>✓ over SSH</td>
+<td>SSH tunnel</td>
+<td>✗</td>
+<td>✗</td>
+<td>✗</td>
+<td>the configured user and port</td>
+<td>claim file, authorized key</td>
 </tr>
 </tbody>
 </table>
