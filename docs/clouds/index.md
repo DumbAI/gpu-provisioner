@@ -16,6 +16,7 @@ adapter only maps a cloud's API onto the contract. Pick one with `--cloud <id>`.
 | B300 / B200 / H200 / H100 in Europe and the US, live spot pricing | `nebius` |
 | European capacity, spot pricing | `verda` |
 | marketplace breadth (many upstream providers) | `primeintellect`, `runpod` |
+| machines you already have (a workstation, a DGX Spark) | `ssh` |
 | trying gpuprov without any account | `docker` |
 
 Prices and stock change minute to minute. Every adapter except AWS and GCP plans
@@ -37,6 +38,7 @@ cheapest first.
 | [Prime Intellect](primeintellect.md) | `primeintellect` | marketplace pod (VM) | `united_states`, `canada`, … | anywhere | live marketplace availability |
 | [RunPod](runpod.md) | `runpod` | GPU container (pod) | continent, or country (`US`) | anywhere | live per-data-center stock |
 | [Docker](docker.md) | `docker` | local sshd container | `local` | `local` | one offer |
+| [SSH hosts](ssh.md) | `ssh` | a machine you own, adopted | the host ids in `[ssh.hosts]` | every configured host | one offer per matching host |
 
 ## Capabilities
 
@@ -53,6 +55,7 @@ cheapest first.
 | Prime Intellect | ✓ over SSH | SSH tunnel | ✗ | ✗ | ✗ | dictated by the pod | — |
 | RunPod | ✗ (containers, no systemd) | — | ✗ | ✗ | container image | `root`@random port | — |
 | Docker | ✗ (no systemd) | — | ✗ | ✗ | ✗ | `ubuntu`@random local port | — |
+| SSH hosts | ✓ over SSH | SSH tunnel | ✗ | ✗ | ✗ | the configured user and port | claim file, authorized key |
 
 Unsupported combinations are rejected **before** planning, with the cloud's
 reason. For example, `--port 8080` on Massed Compute is refused because there is

@@ -20,6 +20,7 @@ pub mod massedcompute;
 pub mod nebius;
 pub mod primeintellect;
 pub mod runpod;
+pub mod ssh;
 pub mod verda;
 
 use std::fmt;
@@ -47,6 +48,7 @@ pub const PROVIDER_IDS: &[&str] = &[
     digitalocean::PROVIDER_ID,
     nebius::PROVIDER_ID,
     docker::PROVIDER_ID,
+    ssh::PROVIDER_ID,
 ];
 
 /// Construct the adapter for a provider id — the single registry point that a
@@ -75,6 +77,7 @@ pub async fn build(
         )?)),
         nebius::PROVIDER_ID => Ok(Box::new(nebius::NebiusProvider::new(&config.nebius)?)),
         docker::PROVIDER_ID => Ok(Box::new(docker::DockerProvider::new(&config.docker))),
+        ssh::PROVIDER_ID => Ok(Box::new(ssh::SshProvider::new(&config.ssh))),
         other => Err(ProviderError::invalid(format!(
             "unknown cloud provider '{other}' (available: {})",
             PROVIDER_IDS.join(", ")

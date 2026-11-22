@@ -89,6 +89,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
+    pub ssh: SshConfig,
+    #[serde(default)]
     pub defaults: Defaults,
 }
 
@@ -108,6 +110,8 @@ impl AppConfig {
             "digitalocean" => &self.digitalocean.regions,
             "nebius" => &self.nebius.regions,
             "docker" => &self.docker.regions,
+            // Every configured host is a candidate: the plan filters them.
+            "ssh" => &[],
             _ => &self.defaults.regions,
         }
     }
@@ -249,6 +253,44 @@ pub struct DockerConfig {
     /// Default region label (only `local` exists).
     #[serde(default)]
     pub regions: Vec<String>,
+}
+
+/// Machines you already have, reached over SSH (`--cloud ssh`): each host
+/// is a region of its own, adopted instead of bought (`provider::ssh`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    /// By id: the `--region` that selects the host.
+    #[serde(default)]
+    pub hosts: BTreeMap<String, SshHostConfig>,
+}
+
+/// One machine and the credentials to reach it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshHostConfig {
+    /// Address or name the machine answers SSH on.
+    pub host: String,
+    /// Login user: needs passwordless `sudo` (k3s installs as a service).
+    pub user: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// Private key that logs `user` in (`~` is expanded). Used to adopt and
+    /// release the host; everything in between uses gpuprov's own key,
+    /// which adopting authorizes.
+    pub identity_file: String,
+    /// What the host offers to `--gpus`, e.g. `"GB10:1"`; absent → a CPU
+    /// host that only `--instance-type` / `--region` select.
+    #[serde(default)]
+    pub gpus: Option<String>,
+    /// Leave k3s installed when the VM is released, so the next one starts
+    /// without reinstalling (default: remove what gpuprov installed).
+    #[serde(default)]
+    pub keep_k3s: bool,
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 #[derive(Debug, Clone, Deserialize)]
